@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	xxhash "github.com/cespare/xxhash/v2"
+	"go.dw1.io/rapidhash"
 )
 
 const bucketsCount = 512
@@ -146,7 +146,7 @@ func New(maxBytes int) *Cache {
 //
 // k and v contents may be modified after returning from Set.
 func (c *Cache) Set(k, v []byte) {
-	h := xxhash.Sum64(k)
+	h := rapidhash.Hash(k)
 	idx := h % bucketsCount
 	c.buckets[idx].Set(k, v, h)
 }
@@ -159,7 +159,7 @@ func (c *Cache) Set(k, v []byte) {
 //
 // k contents may be modified after returning from Get.
 func (c *Cache) Get(dst, k []byte) []byte {
-	h := xxhash.Sum64(k)
+	h := rapidhash.Hash(k)
 	idx := h % bucketsCount
 	dst, _ = c.buckets[idx].Get(dst, k, h, true)
 	return dst
@@ -169,14 +169,14 @@ func (c *Cache) Get(dst, k []byte) []byte {
 // exists in the cache. This method makes it possible to differentiate between a
 // stored nil/empty value versus and non-existing value.
 func (c *Cache) HasGet(dst, k []byte) ([]byte, bool) {
-	h := xxhash.Sum64(k)
+	h := rapidhash.Hash(k)
 	idx := h % bucketsCount
 	return c.buckets[idx].Get(dst, k, h, true)
 }
 
 // Has returns true if entry for the given key k exists in the cache.
 func (c *Cache) Has(k []byte) bool {
-	h := xxhash.Sum64(k)
+	h := rapidhash.Hash(k)
 	idx := h % bucketsCount
 	_, ok := c.buckets[idx].Get(nil, k, h, false)
 	return ok
@@ -186,7 +186,7 @@ func (c *Cache) Has(k []byte) bool {
 //
 // k contents may be modified after returning from Del.
 func (c *Cache) Del(k []byte) {
-	h := xxhash.Sum64(k)
+	h := rapidhash.Hash(k)
 	idx := h % bucketsCount
 	c.buckets[idx].Del(h)
 }

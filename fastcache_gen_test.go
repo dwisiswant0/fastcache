@@ -4,24 +4,30 @@ import (
 	"bytes"
 	"strconv"
 	"testing"
+
+	"go.dw1.io/rapidhash"
 )
 
 func TestGenerationOverflow(t *testing.T) {
 	c := New(1) // each bucket has 64 *1024 bytes capacity
 
 	// Initial generation is 1
-	genVal(t, c, 1)
+	key1 := []byte(strconv.Itoa(26))
+	bucket := int(rapidhash.Hash(key1) % bucketsCount)
 
-	// These two keys has to the same bucket (100), so we can push the
+	key2 := findCollidingKey(t, key1, bucket)
+
+	genVal(t, c, bucket, 1)
+
+	// These two keys hash to the same bucket, so we can push the
 	// generations up much faster.  The keys and values are sized so that
 	// every time we push them into the cache they will completely fill the
 	// bucket
-	key1 := []byte(strconv.Itoa(26))
 	bigVal1 := make([]byte, (32*1024)-(len(key1)+4))
 	for i := range bigVal1 {
 		bigVal1[i] = 1
 	}
-	key2 := []byte(strconv.Itoa(8))
+
 	bigVal2 := make([]byte, (32*1024)-(len(key2)+5))
 	for i := range bigVal2 {
 		bigVal2[i] = 2
@@ -33,14 +39,14 @@ func TestGenerationOverflow(t *testing.T) {
 		c.Set(key2, bigVal2)
 		getVal(t, c, key1, bigVal1)
 		getVal(t, c, key2, bigVal2)
-		genVal(t, c, uint64(1+i))
+		genVal(t, c, bucket, uint64(1+i))
 	}
 
 	// This is a hack to simulate calling Set 2^24-3 times
 	// Actually doing this takes ~24 seconds, making the test slow
-	c.buckets[100].gen = (1 << 24) - 2
+	c.buckets[bucket].gen = (1 << 24) - 2
 
-	// c.buckets[100].gen == 16,777,215
+	// c.buckets[bucket].gen == 16,777,215
 	// Set/Get still works
 
 	c.Set(key1, bigVal1)
@@ -49,10 +55,10 @@ func TestGenerationOverflow(t *testing.T) {
 	getVal(t, c, key1, bigVal1)
 	getVal(t, c, key2, bigVal2)
 
-	genVal(t, c, (1<<24)-1)
+	genVal(t, c, bucket, (1<<24)-1)
 
 	// After the next Set operations
-	// c.buckets[100].gen == 16,777,216
+	// c.buckets[bucket].gen == 16,777,216
 
 	// This set creates an index where `idx | (b.gen << bucketSizeBits)` == 0
 	// The value is in the cache but is unreadable by Get
@@ -70,7 +76,7 @@ func TestGenerationOverflow(t *testing.T) {
 	// Ensure generations are working as we expect
 	// NB: Here we skip the 2^24 generation, because the bucket carefully
 	// avoids `generation==0`
-	genVal(t, c, (1<<24)+1)
+	genVal(t, c, bucket, (1<<24)+1)
 
 	getVal(t, c, key1, bigVal1)
 	getVal(t, c, key2, bigVal2)
@@ -81,7 +87,7 @@ func TestGenerationOverflow(t *testing.T) {
 		c.Set(key2, bigVal2)
 		getVal(t, c, key1, bigVal1)
 		getVal(t, c, key2, bigVal2)
-		genVal(t, c, uint64((1<<24)+2+i))
+		genVal(t, c, bucket, uint64((1<<24)+2+i))
 	}
 }
 
@@ -93,11 +99,26 @@ func getVal(t *testing.T, c *Cache, key, expected []byte) {
 	}
 }
 
-func genVal(t *testing.T, c *Cache, expected uint64) {
+func genVal(t *testing.T, c *Cache, bucket int, expected uint64) {
 	t.Helper()
-	actual := c.buckets[100].gen
+	actual := c.buckets[bucket].gen
 	// Ensure generations are working as we expect
 	if actual != expected {
 		t.Fatalf("Expected generation to be %d found %d instead", expected, actual)
 	}
+}
+
+func findCollidingKey(t *testing.T, key1 []byte, bucket int) []byte {
+	t.Helper()
+	for i := range 1 << 20 {
+		key2 := []byte(strconv.Itoa(i))
+		if bytes.Equal(key1, key2) {
+			continue
+		}
+		if int(rapidhash.Hash(key2)%bucketsCount) == bucket {
+			return key2
+		}
+	}
+	t.Fatalf("failed to find second key in bucket %d", bucket)
+	return nil
 }

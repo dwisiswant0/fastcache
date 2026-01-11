@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	xxhash "github.com/cespare/xxhash/v2"
+	"go.dw1.io/rapidhash"
 )
 
 // maxSubvalueLen is the maximum size of subvalue chunk.
@@ -40,7 +40,7 @@ func (c *Cache) SetBig(k, v []byte) {
 		return
 	}
 	valueLen := len(v)
-	valueHash := xxhash.Sum64(v)
+	valueHash := rapidhash.Hash(v)
 
 	// Split v into chunks with up to 64Kb each.
 	subkey := getSubkeyBuf()
@@ -123,7 +123,7 @@ func (c *Cache) GetBig(dst, k []byte) (r []byte) {
 		atomic.AddUint64(&c.bigStats.InvalidValueLenErrors, 1)
 		return dst[:dstLen]
 	}
-	h := xxhash.Sum64(v)
+	h := rapidhash.Hash(v)
 	if h != valueHash {
 		atomic.AddUint64(&c.bigStats.InvalidValueHashErrors, 1)
 		return dst[:dstLen]
