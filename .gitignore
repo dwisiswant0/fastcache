@@ -1,3 +1,5 @@
+**/out
+
 # If you prefer the allow list template instead of the deny list, see community template:
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
 #
@@ -9,10 +11,10 @@
 *.dylib
 
 # Test binary, built with `go test -c`
-*.test
+*.test*
 
 # Code coverage profiles and other test artifacts
-*.out
+*.out*
 coverage.*
 *.coverprofile
 profile.cov
