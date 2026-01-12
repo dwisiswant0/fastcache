@@ -3,6 +3,7 @@ package fastcache
 import (
 	"fmt"
 	"hash/maphash"
+	"iter"
 	"sync"
 	"sync/atomic"
 )
@@ -222,15 +223,16 @@ func (c *Cache[K, V]) Len() int {
 	return int(c.entryCount.Load())
 }
 
-// Range calls f sequentially for each key and value in the cache.
-// If f returns false, Range stops the iteration.
+// All returns an iterator over all key-value pairs in the cache.
 //
 // Note: It's safe to call other cache methods during iteration,
 // but the iteration may not reflect concurrent modifications.
-func (c *Cache[K, V]) Range(f func(k K, v V) bool) {
-	for i := range c.shards {
-		if !c.shards[i].rangeEntries(f) {
-			return
+func (c *Cache[K, V]) All() iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		for i := range c.shards {
+			if !c.shards[i].rangeEntries(yield) {
+				return
+			}
 		}
 	}
 }
