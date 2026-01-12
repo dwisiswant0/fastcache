@@ -174,6 +174,53 @@ func (c *Cache[K, V]) Has(k K) bool {
 	return ok
 }
 
+// GetOrSet returns the existing value for the key if present.
+// Otherwise, it stores and returns the given value.
+//
+// The loaded result is true if the value was loaded, false if stored.
+func (c *Cache[K, V]) GetOrSet(k K, v V) (actual V, loaded bool) {
+	h := hashKey(k)
+	idx := h % shardsCount
+
+	return c.shards[idx].getOrSet(c, k, v)
+}
+
+func (s *shard[K, V]) getOrSet(c *Cache[K, V], k K, v V) (V, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.entries[k]; ok {
+		atomic.AddUint64(&s.getCalls, 1)
+
+		return existing, true
+	}
+
+	atomic.AddUint64(&s.setCalls, 1)
+
+	maxIter := len(s.order)
+	for i := 0; i < maxIter && c.entryCount.Load() >= int64(c.maxEntries) && len(s.entries) > 0; i++ {
+		slot := &s.order[s.writeIdx]
+		if slot.valid {
+			if _, exists := s.entries[slot.key]; exists {
+				delete(s.entries, slot.key)
+				slot.valid = false
+				c.entryCount.Add(-1)
+				atomic.AddUint64(&s.evictions, 1)
+			} else {
+				slot.valid = false
+			}
+		}
+		s.writeIdx = (s.writeIdx + 1) % len(s.order)
+	}
+
+	s.order[s.writeIdx] = keySlot[K]{key: k, valid: true}
+	s.writeIdx = (s.writeIdx + 1) % len(s.order)
+	s.entries[k] = v
+	c.entryCount.Add(1)
+
+	return v, false
+}
+
 // Delete removes the value for the given key.
 func (c *Cache[K, V]) Delete(k K) {
 	h := hashKey(k)
