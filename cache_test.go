@@ -123,6 +123,44 @@ func TestCacheDel(t *testing.T) {
 	}
 }
 
+func TestCacheGetOrSet(t *testing.T) {
+	c := New[string, string](100)
+	defer c.Reset()
+
+	// First call should store and return loaded=false
+	actual, loaded := c.GetOrSet("key1", "value1")
+	if loaded {
+		t.Fatal("expected loaded=false for new key")
+	}
+	if actual != "value1" {
+		t.Fatalf("unexpected value; got %q; want %q", actual, "value1")
+	}
+
+	// Second call should return existing and loaded=true
+	actual, loaded = c.GetOrSet("key1", "value2")
+	if !loaded {
+		t.Fatal("expected loaded=true for existing key")
+	}
+	if actual != "value1" {
+		t.Fatalf("unexpected value; got %q; want %q (original)", actual, "value1")
+	}
+
+	// Verify value wasn't overwritten
+	v, ok := c.Get("key1")
+	if !ok || v != "value1" {
+		t.Fatalf("value was overwritten; got %q; want %q", v, "value1")
+	}
+
+	// Test with different key
+	actual, loaded = c.GetOrSet("key2", "value2")
+	if loaded {
+		t.Fatal("expected loaded=false for new key2")
+	}
+	if actual != "value2" {
+		t.Fatalf("unexpected value for key2; got %q; want %q", actual, "value2")
+	}
+}
+
 func TestCacheSetGetSerial(t *testing.T) {
 	itemsCount := 10000
 	c := New[string, string](itemsCount * 2)
