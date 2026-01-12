@@ -13,8 +13,10 @@ A fast, generic, thread-safe in-memory cache for Go with FIFO eviction.
 * **Zero allocations**: No allocations on `Get` ops.
 * **Thread-safe**: Concurrent goroutines may read and write into a single cache instance.
 * **FIFO eviction**: Oldest entries are evicted first when the cache is full.
-* **Simple API**: Just `New`, `Get`, `Set`, `Delete`, `Has`, `Len`, `Range`, `Reset`.
+* **Iterators**: Go 1.23+ range-over-func support with `All()`, `Keys()`, `Values()`.
+* **Atomic operations**: `GetOrSet`, `GetAndDelete`, `SetIfAbsent` for lock-free patterns.
 * **Persistence**: Cache can be saved to file and loaded from file.
+* **Simple API**: See [Go reference](https://pkg.go.dev/go.dw1.io/fastcache).
 
 ## Install
 
@@ -59,7 +61,26 @@ func main() {
         fmt.Printf("%s: %d\n", k, v)
     }
 
-    // Get stats
+    // iterate keys only
+    for k := range c.Keys() {
+        fmt.Println(k)
+    }
+
+    // atomic get-or-set
+    actual, loaded := c.GetOrSet("baz", 789)
+    fmt.Printf("value=%d, existed=%v\n", actual, loaded)
+
+    // atomic set-if-absent
+    if c.SetIfAbsent("qux", 101112) {
+        fmt.Println("qux was set")
+    }
+
+    // atomic get-and-delete
+    if v, ok := c.GetAndDelete("bar"); ok {
+        fmt.Println("deleted bar:", v)
+    }
+
+    // get stats
     var stats fastcache.Stats
     c.UpdateStats(&stats)
     fmt.Printf("Hits: %d, Misses: %d\n", stats.Hits, stats.Misses)

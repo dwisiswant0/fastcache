@@ -171,7 +171,7 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 //
 // Returns an error if the file does not exist or is corrupted.
 //
-// See [SaveToFile] for saving cache data to file.
+// See [Cache.SaveToFile] for saving cache data to file.
 func LoadFromFile[K comparable, V any](filePath string) (*Cache[K, V], error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -201,7 +201,7 @@ func LoadFromFileOrNew[K comparable, V any](filePath string, maxEntries int) *Ca
 //
 // Returns an error if the data is corrupted.
 //
-// See [SaveTo] for saving cache data to a writer.
+// See [Cache.SaveTo] for saving cache data to a writer.
 func LoadFrom[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
 	return load[K, V](r)
 }

@@ -9,7 +9,7 @@ import (
 
 // Cache is a fast thread-safe in-memory cache with FIFO eviction.
 //
-// Call [Reset] when the cache is no longer needed. This reclaims the allocated
+// Call [Cache.Reset] when the cache is no longer needed. This reclaims the allocated
 // memory.
 type Cache[K comparable, V any] struct {
 	shards     [shardsCount]shard[K, V]
