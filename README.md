@@ -279,6 +279,13 @@ make bench -C benchmarks
 * No cache expiration: entries are evicted only when the cache is full (FIFO order).
 * No size-based limits: capacity is by entry count, not bytes.
 
+## Status
+
+> [!CAUTION]
+> **`fastcache`** is pre-v1 and does NOT provide a stable API; **use at your own risk**.
+
+Occasional breaking changes may be introduced without notice until a post-v1 release.
+
 ## License
 
 MIT. Same as original. See [LICENSE](/LICENSE).
