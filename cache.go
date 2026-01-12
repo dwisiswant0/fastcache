@@ -221,6 +221,50 @@ func (s *shard[K, V]) getOrSet(c *Cache[K, V], k K, v V) (V, bool) {
 	return v, false
 }
 
+// SetIfAbsent stores the value for a key only if the key is not already present.
+//
+// Returns true if the value was stored, false if the key already existed.
+func (c *Cache[K, V]) SetIfAbsent(k K, v V) (stored bool) {
+	h := hashKey(k)
+	idx := h % shardsCount
+
+	return c.shards[idx].setIfAbsent(c, k, v)
+}
+
+func (s *shard[K, V]) setIfAbsent(c *Cache[K, V], k K, v V) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.entries[k]; exists {
+		return false
+	}
+
+	atomic.AddUint64(&s.setCalls, 1)
+
+	maxIter := len(s.order)
+	for i := 0; i < maxIter && c.entryCount.Load() >= int64(c.maxEntries) && len(s.entries) > 0; i++ {
+		slot := &s.order[s.writeIdx]
+		if slot.valid {
+			if _, exists := s.entries[slot.key]; exists {
+				delete(s.entries, slot.key)
+				slot.valid = false
+				c.entryCount.Add(-1)
+				atomic.AddUint64(&s.evictions, 1)
+			} else {
+				slot.valid = false
+			}
+		}
+		s.writeIdx = (s.writeIdx + 1) % len(s.order)
+	}
+
+	s.order[s.writeIdx] = keySlot[K]{key: k, valid: true}
+	s.writeIdx = (s.writeIdx + 1) % len(s.order)
+	s.entries[k] = v
+	c.entryCount.Add(1)
+
+	return true
+}
+
 // Delete removes the value for the given key.
 func (c *Cache[K, V]) Delete(k K) {
 	h := hashKey(k)

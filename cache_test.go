@@ -196,6 +196,44 @@ func TestCacheGetAndDelete(t *testing.T) {
 	}
 }
 
+func TestCacheSetIfAbsent(t *testing.T) {
+	c := New[string, string](100)
+	defer c.Reset()
+
+	// First SetIfAbsent should succeed
+	if !c.SetIfAbsent("key1", "value1") {
+		t.Fatal("expected stored=true for new key")
+	}
+
+	// Verify the value was stored
+	v, ok := c.Get("key1")
+	if !ok || v != "value1" {
+		t.Fatalf("unexpected value; got %q; want %q", v, "value1")
+	}
+
+	// Second SetIfAbsent should fail (key exists)
+	if c.SetIfAbsent("key1", "value2") {
+		t.Fatal("expected stored=false for existing key")
+	}
+
+	// Value should remain unchanged
+	v, ok = c.Get("key1")
+	if !ok || v != "value1" {
+		t.Fatalf("value was overwritten; got %q; want %q", v, "value1")
+	}
+
+	// After delete, SetIfAbsent should succeed again
+	c.Delete("key1")
+	if !c.SetIfAbsent("key1", "value3") {
+		t.Fatal("expected stored=true after key was deleted")
+	}
+
+	v, ok = c.Get("key1")
+	if !ok || v != "value3" {
+		t.Fatalf("unexpected value after re-set; got %q; want %q", v, "value3")
+	}
+}
+
 func TestCacheSetGetSerial(t *testing.T) {
 	itemsCount := 10000
 	c := New[string, string](itemsCount * 2)
