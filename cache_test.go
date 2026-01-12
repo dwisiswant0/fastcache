@@ -282,6 +282,86 @@ func TestCacheRange(t *testing.T) {
 	}
 }
 
+func TestCacheKeys(t *testing.T) {
+	c := New[string, string](100)
+	defer c.Reset()
+
+	// Add entries
+	for i := 0; i < 50; i++ {
+		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
+	}
+
+	// Collect all keys
+	keys := make(map[string]bool)
+	for k := range c.Keys() {
+		keys[k] = true
+	}
+
+	if len(keys) != 50 {
+		t.Fatalf("unexpected key count; got %d; want 50", len(keys))
+	}
+
+	// Verify expected keys exist
+	for i := 0; i < 50; i++ {
+		if !keys[fmt.Sprintf("key%d", i)] {
+			t.Fatalf("missing key: key%d", i)
+		}
+	}
+
+	// Test early exit
+	count := 0
+	for range c.Keys() {
+		count++
+		if count >= 10 {
+			break
+		}
+	}
+
+	if count != 10 {
+		t.Fatalf("unexpected count with early exit; got %d; want 10", count)
+	}
+}
+
+func TestCacheValues(t *testing.T) {
+	c := New[string, string](100)
+	defer c.Reset()
+
+	// Add entries
+	for i := 0; i < 50; i++ {
+		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
+	}
+
+	// Collect all values
+	values := make(map[string]bool)
+	for v := range c.Values() {
+		values[v] = true
+	}
+
+	if len(values) != 50 {
+		t.Fatalf("unexpected value count; got %d; want 50", len(values))
+	}
+
+	// Verify expected values exist
+	for i := 0; i < 50; i++ {
+		if !values[fmt.Sprintf("value%d", i)] {
+			t.Fatalf("missing value: value%d", i)
+		}
+	}
+
+	// Test early exit
+	count := 0
+	for range c.Values() {
+		count++
+		if count >= 10 {
+			break
+		}
+	}
+
+	if count != 10 {
+		t.Fatalf("unexpected count with early exit; got %d; want 10", count)
+	}
+}
+
 func TestCacheLen(t *testing.T) {
 	c := New[string, string](100)
 	defer c.Reset()

@@ -237,12 +237,66 @@ func (c *Cache[K, V]) All() iter.Seq2[K, V] {
 	}
 }
 
+// Keys returns an iterator over all keys in the cache.
+//
+// Note: It's safe to call other cache methods during iteration,
+// but the iteration may not reflect concurrent modifications.
+func (c *Cache[K, V]) Keys() iter.Seq[K] {
+	return func(yield func(K) bool) {
+		for i := range c.shards {
+			if !c.shards[i].rangeKeys(yield) {
+				return
+			}
+		}
+	}
+}
+
+// Values returns an iterator over all values in the cache.
+//
+// Note: It's safe to call other cache methods during iteration,
+// but the iteration may not reflect concurrent modifications.
+func (c *Cache[K, V]) Values() iter.Seq[V] {
+	return func(yield func(V) bool) {
+		for i := range c.shards {
+			if !c.shards[i].rangeValues(yield) {
+				return
+			}
+		}
+	}
+}
+
 func (s *shard[K, V]) rangeEntries(f func(k K, v V) bool) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	for k, v := range s.entries {
 		if !f(k, v) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (s *shard[K, V]) rangeKeys(f func(k K) bool) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for k := range s.entries {
+		if !f(k) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (s *shard[K, V]) rangeValues(f func(v V) bool) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, v := range s.entries {
+		if !f(v) {
 			return false
 		}
 	}
