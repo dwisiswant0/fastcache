@@ -161,6 +161,41 @@ func TestCacheGetOrSet(t *testing.T) {
 	}
 }
 
+func TestCacheGetAndDelete(t *testing.T) {
+	c := New[string, string](100)
+	defer c.Reset()
+
+	// GetAndDelete on non-existent key
+	v, loaded := c.GetAndDelete("nokey")
+	if loaded {
+		t.Fatal("expected loaded=false for non-existent key")
+	}
+	if v != "" {
+		t.Fatalf("expected zero value; got %q", v)
+	}
+
+	// Set a key, then GetAndDelete
+	c.Set("key1", "value1")
+	v, loaded = c.GetAndDelete("key1")
+	if !loaded {
+		t.Fatal("expected loaded=true for existing key")
+	}
+	if v != "value1" {
+		t.Fatalf("unexpected value; got %q; want %q", v, "value1")
+	}
+
+	// Verify key is gone
+	if _, ok := c.Get("key1"); ok {
+		t.Fatal("key should be deleted after GetAndDelete")
+	}
+
+	// GetAndDelete again should return loaded=false
+	_, loaded = c.GetAndDelete("key1")
+	if loaded {
+		t.Fatal("expected loaded=false after key was deleted")
+	}
+}
+
 func TestCacheSetGetSerial(t *testing.T) {
 	itemsCount := 10000
 	c := New[string, string](itemsCount * 2)

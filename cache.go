@@ -242,6 +242,31 @@ func (s *shard[K, V]) delete(c *Cache[K, V], k K) {
 	s.mu.Unlock()
 }
 
+// GetAndDelete deletes the value for a key, returning the previous value if any.
+//
+// The loaded result reports whether the key was present.
+func (c *Cache[K, V]) GetAndDelete(k K) (v V, loaded bool) {
+	h := hashKey(k)
+	idx := h % shardsCount
+
+	return c.shards[idx].getAndDelete(c, k)
+}
+
+func (s *shard[K, V]) getAndDelete(c *Cache[K, V], k K) (V, bool) {
+	atomic.AddUint64(&s.deletes, 1)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	v, exists := s.entries[k]
+	if exists {
+		delete(s.entries, k)
+		c.entryCount.Add(-1)
+	}
+
+	return v, exists
+}
+
 // Reset removes all the items from the cache.
 func (c *Cache[K, V]) Reset() {
 	for i := range c.shards {
