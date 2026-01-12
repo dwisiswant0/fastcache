@@ -72,6 +72,16 @@ func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) err
 	return nil
 }
 
+// SaveTo saves cache data to the given writer.
+//
+// The data is serialized using [gob] and compressed with [snappy].
+// SaveTo may be called concurrently with other ops on the cache.
+//
+// The saved data may be loaded with [LoadFrom].
+func (c *Cache[K, V]) SaveTo(w io.Writer) error {
+	return c.save(w, 1)
+}
+
 // entry is used for serializing key-value pairs.
 type entry[K comparable, V any] struct {
 	Key   K
@@ -185,6 +195,15 @@ func LoadFromFileOrNew[K comparable, V any](filePath string, maxEntries int) *Ca
 	}
 
 	return New[K, V](maxEntries)
+}
+
+// LoadFrom loads cache data from the given reader.
+//
+// Returns an error if the data is corrupted.
+//
+// See [SaveTo] for saving cache data to a writer.
+func LoadFrom[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
+	return load[K, V](r)
 }
 
 func load[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
