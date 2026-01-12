@@ -55,11 +55,9 @@ func main() {
     c.Delete("foo")
 
     // iterate
-    c.Range(func(k string, v int) bool {
+    for k, v := range c.All() {
         fmt.Printf("%s: %d\n", k, v)
-
-        return true // continue iteration
-    })
+    }
 
     // Get stats
     var stats fastcache.Stats

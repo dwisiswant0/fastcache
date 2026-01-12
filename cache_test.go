@@ -258,23 +258,24 @@ func TestCacheRange(t *testing.T) {
 		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
 	}
 
-	// Count entries via Range
+	// Count entries via All
 	count := 0
-	c.Range(func(k string, v string) bool {
+	for range c.All() {
 		count++
-		return true
-	})
+	}
 
 	if count != 50 {
-		t.Fatalf("unexpected count from Range; got %d; want 50", count)
+		t.Fatalf("unexpected count from All; got %d; want 50", count)
 	}
 
 	// Test early exit
 	count = 0
-	c.Range(func(k string, v string) bool {
+	for range c.All() {
 		count++
-		return count < 10
-	})
+		if count >= 10 {
+			break
+		}
+	}
 
 	if count != 10 {
 		t.Fatalf("unexpected count with early exit; got %d; want 10", count)
