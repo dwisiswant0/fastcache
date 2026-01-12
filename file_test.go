@@ -1,6 +1,7 @@
 package fastcache
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -209,5 +210,90 @@ func TestLoadFromFileOrNew_NonExistent(t *testing.T) {
 	c.Set("key", "value")
 	if v, ok := c.Get("key"); !ok || v != "value" {
 		t.Fatalf("unexpected value; got %q; want %q", v, "value")
+	}
+}
+
+func TestSaveToLoadFrom(t *testing.T) {
+	const itemsCount = 1000
+	c := New[string, string](itemsCount * 2)
+
+	for i := 0; i < itemsCount; i++ {
+		k := fmt.Sprintf("key %d", i)
+		v := fmt.Sprintf("value %d", i)
+		c.Set(k, v)
+	}
+
+	var buf bytes.Buffer
+	if err := c.SaveTo(&buf); err != nil {
+		t.Fatalf("SaveTo error: %s", err)
+	}
+
+	c2, err := LoadFrom[string, string](&buf)
+	if err != nil {
+		t.Fatalf("LoadFrom error: %s", err)
+	}
+
+	if c2.Len() != itemsCount {
+		t.Fatalf("unexpected length; got %d; want %d", c2.Len(), itemsCount)
+	}
+
+	for i := 0; i < itemsCount; i++ {
+		k := fmt.Sprintf("key %d", i)
+		v := fmt.Sprintf("value %d", i)
+		vv, ok := c2.Get(k)
+		if !ok || v != vv {
+			t.Fatalf("unexpected cache value for k=%q; got %q; want %q", k, vv, v)
+		}
+	}
+}
+
+func TestSaveToLoadFrom_Struct(t *testing.T) {
+	type User struct {
+		ID   int
+		Name string
+		Tags []string
+	}
+
+	c := New[int, User](100)
+
+	users := []User{
+		{ID: 1, Name: "Alice", Tags: []string{"admin", "user"}},
+		{ID: 2, Name: "Bob", Tags: []string{"user"}},
+		{ID: 3, Name: "Charlie", Tags: nil},
+	}
+
+	for _, u := range users {
+		c.Set(u.ID, u)
+	}
+
+	var buf bytes.Buffer
+	if err := c.SaveTo(&buf); err != nil {
+		t.Fatalf("SaveTo error: %s", err)
+	}
+
+	c2, err := LoadFrom[int, User](&buf)
+	if err != nil {
+		t.Fatalf("LoadFrom error: %s", err)
+	}
+
+	for _, u := range users {
+		got, ok := c2.Get(u.ID)
+		if !ok {
+			t.Fatalf("user %d not found after load", u.ID)
+		}
+		if got.ID != u.ID || got.Name != u.Name {
+			t.Fatalf("unexpected user; got %+v; want %+v", got, u)
+		}
+		if len(got.Tags) != len(u.Tags) {
+			t.Fatalf("unexpected tags length; got %d; want %d", len(got.Tags), len(u.Tags))
+		}
+	}
+}
+
+func TestLoadFrom_EmptyReader(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := LoadFrom[string, string](&buf)
+	if err == nil {
+		t.Fatal("LoadFrom must return error for empty reader")
 	}
 }
