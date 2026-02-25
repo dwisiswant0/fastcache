@@ -106,7 +106,7 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 	errCh := make(chan error, concurrency)
 
 	var wg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
+	for range concurrency {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -124,7 +124,7 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 	}
 
 	go func() {
-		for i := 0; i < shardsCount; i++ {
+		for i := range shardsCount {
 			shardCh <- i
 		}
 		close(shardCh)

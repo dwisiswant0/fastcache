@@ -154,7 +154,7 @@ func ExampleCache_SaveToFileConcurrent() {
 	defer cache.Reset()
 
 	// Add many entries
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		cache.Set(i, fmt.Sprintf("value-%d", i))
 	}
 

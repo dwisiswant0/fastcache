@@ -75,7 +75,7 @@ func BenchmarkCacheGetConcurrent(b *testing.B) {
 	defer c.Reset()
 
 	// Pre-populate
-	for i := 0; i < 1000000; i++ {
+	for i := range 1000000 {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
 		c.Set(k, v)

@@ -81,7 +81,7 @@ func testSaveLoadFile(t *testing.T, concurrency int) {
 
 	const itemsCount = 10000
 	c := New[string, string](itemsCount * 2)
-	for i := 0; i < itemsCount; i++ {
+	for i := range itemsCount {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
 		c.Set(k, v)
@@ -116,7 +116,7 @@ func testSaveLoadFile(t *testing.T, concurrency int) {
 	if s.EntriesCount != itemsCount {
 		t.Fatalf("unexpected entriesCount; got %d; want %d", s.EntriesCount, itemsCount)
 	}
-	for i := 0; i < itemsCount; i++ {
+	for i := range itemsCount {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
 		vv, ok := c.Get(k)
@@ -133,7 +133,7 @@ func testSaveLoadFile(t *testing.T, concurrency int) {
 	if s.EntriesCount != itemsCount {
 		t.Fatalf("unexpected entriesCount; got %d; want %d", s.EntriesCount, itemsCount)
 	}
-	for i := 0; i < itemsCount; i++ {
+	for i := range itemsCount {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
 		vv, ok := c.Get(k)
@@ -217,7 +217,7 @@ func TestSaveToLoadFrom(t *testing.T) {
 	const itemsCount = 1000
 	c := New[string, string](itemsCount * 2)
 
-	for i := 0; i < itemsCount; i++ {
+	for i := range itemsCount {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
 		c.Set(k, v)
@@ -237,7 +237,7 @@ func TestSaveToLoadFrom(t *testing.T) {
 		t.Fatalf("unexpected length; got %d; want %d", c2.Len(), itemsCount)
 	}
 
-	for i := 0; i < itemsCount; i++ {
+	for i := range itemsCount {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
 		vv, ok := c2.Get(k)

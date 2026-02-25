@@ -72,7 +72,7 @@ func TestCacheWrap(t *testing.T) {
 
 	calls := 5000
 
-	for i := 0; i < calls; i++ {
+	for i := range calls {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
 		c.Set(k, v)
@@ -84,7 +84,7 @@ func TestCacheWrap(t *testing.T) {
 
 	// Some entries may have been evicted
 	hits := 0
-	for i := 0; i < calls; i++ {
+	for i := range calls {
 		k := fmt.Sprintf("key %d", i)
 		if _, ok := c.Get(k); ok {
 			hits++
@@ -108,7 +108,7 @@ func TestCacheDel(t *testing.T) {
 	c := New[string, string](1024)
 	defer c.Reset()
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
 		c.Set(k, v)
@@ -250,12 +250,12 @@ func TestCacheGetSetConcurrent(t *testing.T) {
 	defer c.Reset()
 
 	ch := make(chan error, goroutines)
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		go func() {
 			ch <- testCacheGetSet(c, itemsCount)
 		}()
 	}
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		select {
 		case err := <-ch:
 			if err != nil {
@@ -268,7 +268,7 @@ func TestCacheGetSetConcurrent(t *testing.T) {
 }
 
 func testCacheGetSet(c *Cache[string, string], itemsCount int) error {
-	for i := 0; i < itemsCount; i++ {
+	for i := range itemsCount {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
 		c.Set(k, v)
@@ -278,7 +278,7 @@ func testCacheGetSet(c *Cache[string, string], itemsCount int) error {
 		}
 	}
 	misses := 0
-	for i := 0; i < itemsCount; i++ {
+	for i := range itemsCount {
 		k := fmt.Sprintf("key %d", i)
 		vExpected := fmt.Sprintf("value %d", i)
 		v, ok := c.Get(k)
@@ -303,7 +303,7 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 
 	// run workers for cache reset
 	var resettersWG sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		resettersWG.Add(1)
 		go func() {
 			defer resettersWG.Done()
@@ -321,7 +321,7 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 
 	// run workers for update cache stats
 	var statsWG sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		statsWG.Add(1)
 		go func() {
 			defer statsWG.Done()
@@ -340,11 +340,11 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 
 	// run workers for setting data to cache
 	var settersWG sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		settersWG.Add(1)
 		go func() {
 			defer settersWG.Done()
-			for j := 0; j < 100; j++ {
+			for j := range 100 {
 				key := fmt.Sprintf("key_%d", j)
 				value := fmt.Sprintf("value_%d", j)
 				c.Set(key, value)
@@ -365,7 +365,7 @@ func TestCacheRange(t *testing.T) {
 	defer c.Reset()
 
 	// Add entries
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
 	}
 
@@ -398,7 +398,7 @@ func TestCacheKeys(t *testing.T) {
 	defer c.Reset()
 
 	// Add entries
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
 	}
 
@@ -413,7 +413,7 @@ func TestCacheKeys(t *testing.T) {
 	}
 
 	// Verify expected keys exist
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		if !keys[fmt.Sprintf("key%d", i)] {
 			t.Fatalf("missing key: key%d", i)
 		}
@@ -438,7 +438,7 @@ func TestCacheValues(t *testing.T) {
 	defer c.Reset()
 
 	// Add entries
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
 	}
 
@@ -453,7 +453,7 @@ func TestCacheValues(t *testing.T) {
 	}
 
 	// Verify expected values exist
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		if !values[fmt.Sprintf("value%d", i)] {
 			t.Fatalf("missing value: value%d", i)
 		}
@@ -481,7 +481,7 @@ func TestCacheLen(t *testing.T) {
 		t.Fatalf("unexpected len for empty cache; got %d; want 0", c.Len())
 	}
 
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
 	}
 
