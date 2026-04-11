@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/golang/snappy"
+	"github.com/minio/minlz"
 )
 
 // SaveToFile atomically saves cache data to the given filePath.
@@ -89,7 +89,7 @@ type entry[K comparable, V any] struct {
 }
 
 func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
-	zw := snappy.NewBufferedWriter(w)
+	zw := minlz.NewWriter(w)
 	enc := gob.NewEncoder(zw)
 
 	if err := enc.Encode(c.maxEntries); err != nil {
@@ -161,7 +161,7 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 	}
 
 	if err := zw.Close(); err != nil {
-		return fmt.Errorf("cannot close snappy writer: %s", err)
+		return fmt.Errorf("cannot close minlz writer: %s", err)
 	}
 
 	return nil
@@ -207,7 +207,7 @@ func LoadFrom[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
 }
 
 func load[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
-	zr := snappy.NewReader(r)
+	zr := minlz.NewReader(r)
 	dec := gob.NewDecoder(zr)
 
 	var maxEntries int

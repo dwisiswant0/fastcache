@@ -41,7 +41,7 @@
 //
 // The cache can be saved (with [Cache.SaveTo], [Cache.SaveToFile], and
 // [Cache.SaveToFileConcurrent]) and loaded (from [LoadFrom] and [LoadFromFile])
-// to/from [io.Writer]/[io.Reader] or files using [gob] encoding with [snappy]
+// to/from [io.Writer]/[io.Reader] or files using [gob] encoding with [minlz]
 // compression.
 //
 // # Thread Safety

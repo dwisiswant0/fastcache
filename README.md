@@ -2,7 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/go.dw1.io/fastcache.svg)](https://pkg.go.dev/go.dw1.io/fastcache)
 
-A fast, generic, thread-safe in-memory cache for Go with FIFO eviction.
+A fast, generic, thread-safe cache for Go.
 
 > [!NOTE]
 > This is a fork of [VictoriaMetrics/fastcache](https://github.com/VictoriaMetrics/fastcache) with a redesigned API using Go generics.
