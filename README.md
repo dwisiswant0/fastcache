@@ -106,7 +106,6 @@ The cache uses a sharded design for concurrent scalability:
 * **512 shards**: Each with its own lock, reducing contention on multi-core CPUs.
 * **Generic map storage**: `map[K]V` per shard for O(1) lookups.
 * **Ring buffer for FIFO**: Circular buffer tracks insertion order for eviction.
-* **maphash.Comparable**: Zero-allocation hashing for any comparable key type.
 
 ## Differences from Original
 
