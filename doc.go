@@ -12,8 +12,7 @@
 //   - A map[K]V for O(1) lookups.
 //   - A ring buffer tracking insertion order for FIFO eviction.
 //
-// Keys are distributed across shards using [maphash.Comparable] for
-// zero-allocation hashing of any comparable type.
+// Keys are distributed across shards using rapidhash-based shard hashing.
 //
 // # Eviction
 //

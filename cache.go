@@ -3,9 +3,10 @@ package fastcache
 import (
 	"encoding/binary"
 	"fmt"
-	"hash/maphash"
 	"iter"
 	"sync/atomic"
+
+	"go.dw1.io/rapidhash"
 )
 
 // Cache is a fast thread-safe in-memory cache.
@@ -169,9 +170,6 @@ func (c *Cache[K, V]) Values() iter.Seq[V] {
 	}
 }
 
-// hashSeed is the seed used for hashing keys.
-var hashSeed = maphash.MakeSeed()
-
 func shardIndex[K comparable](k K) int {
 	return int(hashKey(k) & shardMask)
 }
@@ -182,20 +180,17 @@ func hashKey[K comparable](k K) uint64 {
 		return hashStringKey(s)
 	}
 
-	return maphash.Comparable(hashSeed, k)
+	return rapidhash.HashComparable(k)
 }
 
 func hashStringKey(s string) uint64 {
 	if len(s) <= stringShardSamples*stringShardSampleSize {
-		return maphash.String(hashSeed, s)
+		return rapidhash.HashStringNano(s)
 	}
 
-	var h maphash.Hash
-	h.SetSeed(hashSeed)
-
-	var lenBuf [8]byte
-	binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(s)))
-	_, _ = h.Write(lenBuf[:])
+	var sampled [8 + stringShardSamples*stringShardSampleSize]byte
+	binary.LittleEndian.PutUint64(sampled[:8], uint64(len(s)))
+	offset := 8
 
 	starts := [stringShardSamples]int{
 		0,
@@ -214,8 +209,8 @@ func hashStringKey(s string) uint64 {
 			start = end - stringShardSampleSize
 		}
 
-		_, _ = h.WriteString(s[start:end])
+		offset += copy(sampled[offset:], s[start:end])
 	}
 
-	return h.Sum64()
+	return rapidhash.HashMicro(sampled[:offset])
 }
