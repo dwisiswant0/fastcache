@@ -515,3 +515,95 @@ func TestCacheStruct(t *testing.T) {
 		t.Fatalf("unexpected user; got %+v; want %+v", got, u)
 	}
 }
+
+func TestCacheHandlesForcedShardCollisions(t *testing.T) {
+	const maxEntries = 8
+
+	c := New[string, string](maxEntries)
+	c.hasher = func(string) uint64 { return 1 }
+	defer c.Reset()
+
+	for i := range maxEntries * 2 {
+		key := fmt.Sprintf("key-%d", i)
+		value := fmt.Sprintf("value-%d", i)
+		c.Set(key, value)
+	}
+
+	if c.Len() != maxEntries {
+		t.Fatalf("unexpected len after forced collisions; got %d; want %d", c.Len(), maxEntries)
+	}
+
+	for i := range maxEntries {
+		key := fmt.Sprintf("key-%d", i)
+		if _, ok := c.Get(key); ok {
+			t.Fatalf("unexpected stale key after fifo eviction under forced collisions: %q", key)
+		}
+	}
+
+	for i := range maxEntries {
+		idx := i + maxEntries
+		key := fmt.Sprintf("key-%d", idx)
+		want := fmt.Sprintf("value-%d", idx)
+		got, ok := c.Get(key)
+		if !ok || got != want {
+			t.Fatalf("unexpected value for forced-collision key %q; got (%q, %t); want (%q, true)", key, got, ok, want)
+		}
+	}
+
+	if stored := c.SetIfAbsent("key-12", "newer"); stored {
+		t.Fatal("SetIfAbsent unexpectedly overwrote an existing forced-collision key")
+	}
+
+	actual, loaded := c.GetOrSet("key-12", "newer")
+	if !loaded || actual != "value-12" {
+		t.Fatalf("GetOrSet returned (%q, %t); want (%q, true)", actual, loaded, "value-12")
+	}
+
+	deleted, ok := c.GetAndDelete("key-12")
+	if !ok || deleted != "value-12" {
+		t.Fatalf("GetAndDelete returned (%q, %t); want (%q, true)", deleted, ok, "value-12")
+	}
+	if _, ok := c.Get("key-12"); ok {
+		t.Fatal("forced-collision key still present after GetAndDelete")
+	}
+
+	if !c.SetIfAbsent("key-12", "replacement") {
+		t.Fatal("SetIfAbsent failed after deleting a forced-collision key")
+	}
+	if got, ok := c.Get("key-12"); !ok || got != "replacement" {
+		t.Fatalf("unexpected replacement value; got (%q, %t); want (%q, true)", got, ok, "replacement")
+	}
+}
+
+func TestCacheEnforcesGlobalCapacityAcrossShards(t *testing.T) {
+	c := New[string, string](4)
+	c.hasher = func(k string) uint64 {
+		if k[0] == 'a' {
+			return 1
+		}
+
+		return 2
+	}
+	defer c.Reset()
+
+	for i := range 4 {
+		key := fmt.Sprintf("a%d", i)
+		c.Set(key, key)
+	}
+
+	c.Set("b0", "b0")
+
+	if c.Len() != 4 {
+		t.Fatalf("unexpected len after cross-shard insertion at capacity; got %d; want 4", c.Len())
+	}
+	if _, ok := c.Get("a0"); ok {
+		t.Fatal("oldest key remained after cross-shard insertion at capacity")
+	}
+
+	for _, key := range []string{"a1", "a2", "a3", "b0"} {
+		got, ok := c.Get(key)
+		if !ok || got != key {
+			t.Fatalf("unexpected value for key %q; got (%q, %t)", key, got, ok)
+		}
+	}
+}

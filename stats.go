@@ -1,7 +1,5 @@
 package fastcache
 
-import "sync/atomic"
-
 // Stats represents cache stats.
 //
 // Use [Cache.UpdateStats] for obtaining fresh stats from the cache.
@@ -37,11 +35,13 @@ type Stats struct {
 func (c *Cache[K, V]) UpdateStats(s *Stats) {
 	for i := range c.shards {
 		shard := &c.shards[i]
-		s.GetCalls += atomic.LoadUint64(&shard.getCalls)
-		s.SetCalls += atomic.LoadUint64(&shard.setCalls)
-		s.Misses += atomic.LoadUint64(&shard.misses)
-		s.Deletes += atomic.LoadUint64(&shard.deletes)
-		s.Evictions += atomic.LoadUint64(&shard.evictions)
+		shard.mu.Lock()
+		s.GetCalls += shard.getCalls
+		s.SetCalls += shard.setCalls
+		s.Misses += shard.misses
+		s.Deletes += shard.deletes
+		s.Evictions += shard.evictions
+		shard.mu.Unlock()
 	}
 
 	s.EntriesCount = uint64(c.entryCount.Load())
