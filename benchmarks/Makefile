@@ -8,8 +8,10 @@ Otter := $(OUT)/otter
 bench:
 	@mkdir -p $(OUT) 2>/dev/null || true
 	@rm -f $(OUT)/*
-
 	@go test -count=10 -bench=. -benchmem | tee $(RESULTS)
+	@$(MAKE) separate-results
+
+separate-results:
 	@grep -E '^(goos|goarch|pkg|cpu):' $(RESULTS) > $(HEADER)
 
 	@cat $(HEADER) > $(Fastcache)
