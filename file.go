@@ -113,15 +113,9 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 			for idx := range shardCh {
 				shard := &c.shards[idx]
 				shard.mu.RLock()
-				entries := make([]entry[K, V], 0, shard.entryLen())
-				if shard.entries != nil {
-					for k, v := range shard.entries {
-						entries = append(entries, entry[K, V]{Key: k, Value: v})
-					}
-				} else {
-					for _, inline := range shard.smallEntries {
-						entries = append(entries, entry[K, V]{Key: inline.key, Value: inline.value})
-					}
+				entries := make([]entry[K, V], 0, len(shard.entries))
+				for k, v := range shard.entries {
+					entries = append(entries, entry[K, V]{Key: k, Value: v})
 				}
 				shard.mu.RUnlock()
 				resultCh <- shardData{idx: idx, entries: entries}
