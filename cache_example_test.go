@@ -10,11 +10,16 @@ import (
 // ExampleCache demonstrates basic cache operations.
 func ExampleCache() {
 	// Create a new cache with capacity for 100 entries
-	cache := fastcache.New[string, string](100)
+	cache, err := fastcache.New[string, string](100)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	// Set a key-value pair
-	cache.Set("key1", "value1")
+	if err := cache.Set("key1", "value1"); err != nil {
+		return
+	}
 
 	// Get the value
 	if value, ok := cache.Get("key1"); ok {
@@ -33,15 +38,24 @@ func ExampleCache() {
 
 // ExampleCache_GetOrSet demonstrates the GetOrSet method.
 func ExampleCache_GetOrSet() {
-	cache := fastcache.New[string, int](10)
+	cache, err := fastcache.New[string, int](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	// Key doesn't exist, so it will be set
-	value, loaded := cache.GetOrSet("counter", 1)
+	value, loaded, err := cache.GetOrSet("counter", 1)
+	if err != nil {
+		return
+	}
 	fmt.Printf("First call - Value: %d, Loaded: %t\n", value, loaded)
 
 	// Key exists, so existing value is returned
-	value, loaded = cache.GetOrSet("counter", 2)
+	value, loaded, err = cache.GetOrSet("counter", 2)
+	if err != nil {
+		return
+	}
 	fmt.Printf("Second call - Value: %d, Loaded: %t\n", value, loaded)
 
 	// Output:
@@ -51,15 +65,24 @@ func ExampleCache_GetOrSet() {
 
 // ExampleCache_SetIfAbsent demonstrates the SetIfAbsent method.
 func ExampleCache_SetIfAbsent() {
-	cache := fastcache.New[string, string](10)
+	cache, err := fastcache.New[string, string](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	// Key doesn't exist, so it will be set
-	stored := cache.SetIfAbsent("key", "first")
+	stored, err := cache.SetIfAbsent("key", "first")
+	if err != nil {
+		return
+	}
 	fmt.Printf("First set - Stored: %t\n", stored)
 
 	// Key exists, so it won't be set
-	stored = cache.SetIfAbsent("key", "second")
+	stored, err = cache.SetIfAbsent("key", "second")
+	if err != nil {
+		return
+	}
 	fmt.Printf("Second set - Stored: %t\n", stored)
 
 	// Check the value
@@ -75,10 +98,15 @@ func ExampleCache_SetIfAbsent() {
 
 // ExampleCache_GetAndDelete demonstrates the GetAndDelete method.
 func ExampleCache_GetAndDelete() {
-	cache := fastcache.New[string, string](10)
+	cache, err := fastcache.New[string, string](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
-	cache.Set("temp", "data")
+	if err := cache.Set("temp", "data"); err != nil {
+		return
+	}
 
 	// Get and delete the value
 	value, loaded := cache.GetAndDelete("temp")
@@ -96,12 +124,19 @@ func ExampleCache_GetAndDelete() {
 
 // ExampleCache_All demonstrates iterating over all key-value pairs.
 func ExampleCache_All() {
-	cache := fastcache.New[string, int](10)
+	cache, err := fastcache.New[string, int](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	// Add some data
-	cache.Set("item1", 42)
-	cache.Set("item2", 84)
+	if err := cache.Set("item1", 42); err != nil {
+		return
+	}
+	if err := cache.Set("item2", 84); err != nil {
+		return
+	}
 
 	fmt.Println("Cache entries:")
 	entries := make([]string, 0, 2)
@@ -121,12 +156,21 @@ func ExampleCache_All() {
 
 // ExampleCache_Keys demonstrates iterating over all keys.
 func ExampleCache_Keys() {
-	cache := fastcache.New[string, int](10)
+	cache, err := fastcache.New[string, int](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
-	cache.Set("x", 10)
-	cache.Set("y", 20)
-	cache.Set("z", 30)
+	if err := cache.Set("x", 10); err != nil {
+		return
+	}
+	if err := cache.Set("y", 20); err != nil {
+		return
+	}
+	if err := cache.Set("z", 30); err != nil {
+		return
+	}
 
 	fmt.Println("Keys found:")
 	keys := make([]string, 0, 3)
@@ -148,12 +192,21 @@ func ExampleCache_Keys() {
 
 // ExampleCache_Values demonstrates iterating over all values.
 func ExampleCache_Values() {
-	cache := fastcache.New[string, int](10)
+	cache, err := fastcache.New[string, int](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
-	cache.Set("p", 100)
-	cache.Set("q", 200)
-	cache.Set("r", 300)
+	if err := cache.Set("p", 100); err != nil {
+		return
+	}
+	if err := cache.Set("q", 200); err != nil {
+		return
+	}
+	if err := cache.Set("r", 300); err != nil {
+		return
+	}
 
 	fmt.Println("Values found:")
 	values := make([]int, 0, 3)
@@ -175,13 +228,20 @@ func ExampleCache_Values() {
 
 // ExampleCache_Len demonstrates getting the cache size.
 func ExampleCache_Len() {
-	cache := fastcache.New[string, string](10)
+	cache, err := fastcache.New[string, string](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	fmt.Println("Initial length:", cache.Len())
 
-	cache.Set("key1", "value1")
-	cache.Set("key2", "value2")
+	if err := cache.Set("key1", "value1"); err != nil {
+		return
+	}
+	if err := cache.Set("key2", "value2"); err != nil {
+		return
+	}
 
 	fmt.Println("After adding items:", cache.Len())
 
@@ -192,12 +252,19 @@ func ExampleCache_Len() {
 
 // ExampleCache_Delete demonstrates deleting items from the cache.
 func ExampleCache_Delete() {
-	cache := fastcache.New[string, string](10)
+	cache, err := fastcache.New[string, string](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	// Add some items
-	cache.Set("key1", "value1")
-	cache.Set("key2", "value2")
+	if err := cache.Set("key1", "value1"); err != nil {
+		return
+	}
+	if err := cache.Set("key2", "value2"); err != nil {
+		return
+	}
 
 	fmt.Println("Before deletion:")
 	fmt.Printf("Length: %d\n", cache.Len())
@@ -225,12 +292,21 @@ func ExampleCache_Delete() {
 
 // ExampleCache_Reset demonstrates resetting the cache.
 func ExampleCache_Reset() {
-	cache := fastcache.New[string, int](10)
+	cache, err := fastcache.New[string, int](10)
+	if err != nil {
+		return
+	}
 
 	// Add some items
-	cache.Set("a", 1)
-	cache.Set("b", 2)
-	cache.Set("c", 3)
+	if err := cache.Set("a", 1); err != nil {
+		return
+	}
+	if err := cache.Set("b", 2); err != nil {
+		return
+	}
+	if err := cache.Set("c", 3); err != nil {
+		return
+	}
 
 	fmt.Printf("Before reset - Length: %d\n", cache.Len())
 
@@ -253,7 +329,10 @@ func ExampleCache_Reset() {
 // ExampleNew demonstrates creating a new cache.
 func ExampleNew() {
 	// Create a new cache with capacity for 100 entries
-	cache := fastcache.New[string, int](100)
+	cache, err := fastcache.New[string, int](100)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	fmt.Printf("Created cache with capacity: %d\n", 100)
@@ -266,12 +345,19 @@ func ExampleNew() {
 
 // ExampleCache_Get demonstrates getting values from the cache.
 func ExampleCache_Get() {
-	cache := fastcache.New[string, string](10)
+	cache, err := fastcache.New[string, string](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	// Set some values
-	cache.Set("name", "Alice")
-	cache.Set("age", "30")
+	if err := cache.Set("name", "Alice"); err != nil {
+		return
+	}
+	if err := cache.Set("age", "30"); err != nil {
+		return
+	}
 
 	// Get existing value
 	if value, ok := cache.Get("name"); ok {
@@ -290,10 +376,15 @@ func ExampleCache_Get() {
 
 // ExampleCache_Has demonstrates checking if keys exist in the cache.
 func ExampleCache_Has() {
-	cache := fastcache.New[string, string](10)
+	cache, err := fastcache.New[string, string](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
-	cache.Set("user", "john")
+	if err := cache.Set("user", "john"); err != nil {
+		return
+	}
 
 	// Check existing key
 	if cache.Has("user") {
@@ -312,17 +403,26 @@ func ExampleCache_Has() {
 
 // ExampleCache_Set demonstrates setting values in the cache.
 func ExampleCache_Set() {
-	cache := fastcache.New[string, int](10)
+	cache, err := fastcache.New[string, int](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	// Set some values
-	cache.Set("score", 100)
-	cache.Set("level", 5)
+	if err := cache.Set("score", 100); err != nil {
+		return
+	}
+	if err := cache.Set("level", 5); err != nil {
+		return
+	}
 
 	fmt.Printf("Cache length: %d\n", cache.Len())
 
 	// Values can be overwritten
-	cache.Set("score", 150)
+	if err := cache.Set("score", 150); err != nil {
+		return
+	}
 	if value, ok := cache.Get("score"); ok {
 		fmt.Printf("Updated score: %d\n", value)
 	}
@@ -356,12 +456,19 @@ func ExampleStats_Reset() {
 
 // ExampleCache_UpdateStats demonstrates getting cache statistics.
 func ExampleCache_UpdateStats() {
-	cache := fastcache.New[string, string](10)
+	cache, err := fastcache.New[string, string](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	// Perform some cache operations
-	cache.Set("key1", "value1")
-	cache.Set("key2", "value2")
+	if err := cache.Set("key1", "value1"); err != nil {
+		return
+	}
+	if err := cache.Set("key2", "value2"); err != nil {
+		return
+	}
 	cache.Get("key1") // This will be a hit
 	cache.Get("key3") // This will be a miss
 	cache.Delete("key2")

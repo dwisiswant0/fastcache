@@ -2,6 +2,7 @@ package fastcache
 
 import (
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -183,14 +184,20 @@ func LoadFromFile[K comparable, V any](filePath string) (*Cache[K, V], error) {
 // LoadFromFileOrNew tries loading cache data from the given filePath.
 //
 // The function falls back to creating a new cache with the given maxEntries
-// capacity if an error occurs during loading.
-func LoadFromFileOrNew[K comparable, V any](filePath string, maxEntries int) *Cache[K, V] {
+// capacity if an error occurs during loading. It returns an error only if the
+// fallback cache cannot be created.
+func LoadFromFileOrNew[K comparable, V any](filePath string, maxEntries int) (*Cache[K, V], error) {
 	c, err := LoadFromFile[K, V](filePath)
 	if err == nil {
-		return c
+		return c, nil
 	}
 
-	return New[K, V](maxEntries)
+	fallback, newErr := New[K, V](maxEntries)
+	if newErr != nil {
+		return nil, errors.Join(err, fmt.Errorf("cannot create fallback cache: %w", newErr))
+	}
+
+	return fallback, nil
 }
 
 // LoadFrom loads cache data from the given reader.
@@ -211,7 +218,10 @@ func load[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
 		return nil, fmt.Errorf("cannot decode maxEntries: %s", err)
 	}
 
-	c := New[K, V](maxEntries)
+	c, err := New[K, V](maxEntries)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create cache: %w", err)
+	}
 
 	var totalEntries int
 	if err := dec.Decode(&totalEntries); err != nil {
@@ -223,7 +233,9 @@ func load[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
 		if err := dec.Decode(&e); err != nil {
 			return nil, fmt.Errorf("cannot decode entry %d: %s", i, err)
 		}
-		c.Set(e.Key, e.Value)
+		if err := c.Set(e.Key, e.Value); err != nil {
+			return nil, fmt.Errorf("cannot insert entry %d: %w", i, err)
+		}
 	}
 
 	return c, nil

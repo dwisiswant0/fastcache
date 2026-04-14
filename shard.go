@@ -45,7 +45,7 @@ func deleteEntry[K comparable, V any](bucket []entry[K, V], idx int) []entry[K, 
 	return bucket[:last]
 }
 
-func (s *shard[K, V]) set(c *Cache[K, V], idx int, hash uint64, k K, v V) {
+func (s *shard[K, V]) set(c *Cache[K, V], idx int, hash uint64, k K, v V) error {
 	s.mu.Lock()
 	s.setCalls++
 
@@ -55,11 +55,13 @@ func (s *shard[K, V]) set(c *Cache[K, V], idx int, hash uint64, k K, v V) {
 		bucket[pos].Value = v
 		s.mu.Unlock()
 
-		return
+		return nil
 	}
 	s.mu.Unlock()
 
-	c.runInsert(opSet, idx, hash, k, v)
+	_, err := c.runInsert(opSet, idx, hash, k, v)
+
+	return err
 }
 
 func (s *shard[K, V]) get(hash uint64, k K) (V, bool) {
@@ -82,7 +84,7 @@ func (s *shard[K, V]) get(hash uint64, k K) (V, bool) {
 	return zero, false
 }
 
-func (s *shard[K, V]) getOrSet(c *Cache[K, V], idx int, hash uint64, k K, v V) (V, bool) {
+func (s *shard[K, V]) getOrSet(c *Cache[K, V], idx int, hash uint64, k K, v V) (V, bool, error) {
 	s.mu.Lock()
 
 	bucket := s.entries[hash]
@@ -91,28 +93,36 @@ func (s *shard[K, V]) getOrSet(c *Cache[K, V], idx int, hash uint64, k K, v V) (
 		existing := bucket[pos].Value
 		s.mu.Unlock()
 
-		return existing, true
+		return existing, true, nil
 	}
 	s.mu.Unlock()
 
-	result := c.runInsert(opGetOrSet, idx, hash, k, v)
+	result, err := c.runInsert(opGetOrSet, idx, hash, k, v)
+	if err != nil {
+		var zero V
 
-	return result.value, result.loaded
+		return zero, false, err
+	}
+
+	return result.value, result.loaded, nil
 }
 
-func (s *shard[K, V]) setIfAbsent(c *Cache[K, V], idx int, hash uint64, k K, v V) bool {
+func (s *shard[K, V]) setIfAbsent(c *Cache[K, V], idx int, hash uint64, k K, v V) (bool, error) {
 	s.mu.Lock()
 
 	if findEntry(s.entries[hash], k) >= 0 {
 		s.mu.Unlock()
 
-		return false
+		return false, nil
 	}
 	s.mu.Unlock()
 
-	result := c.runInsert(opSetIfAbsent, idx, hash, k, v)
+	result, err := c.runInsert(opSetIfAbsent, idx, hash, k, v)
+	if err != nil {
+		return false, err
+	}
 
-	return result.stored
+	return result.stored, nil
 }
 
 func (s *shard[K, V]) delete(c *Cache[K, V], hash uint64, k K) {

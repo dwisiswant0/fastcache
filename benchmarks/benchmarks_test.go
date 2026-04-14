@@ -170,24 +170,34 @@ func BenchmarkFastcacheFork(b *testing.B) {
 		}
 
 		b.Run(fmt.Sprintf("Set/%d", size), func(b *testing.B) {
-			c := fastcache.New[string, []byte](12 * size)
+			c, err := fastcache.New[string, []byte](12 * size)
+			if err != nil {
+				b.Fatalf("fastcache.New error: %s", err)
+			}
 			defer c.Reset()
 
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				idx := i % maxItems
-				c.Set(stringKeys[idx], data.values[idx])
+				if err := c.Set(stringKeys[idx], data.values[idx]); err != nil {
+					b.Fatalf("Set error: %s", err)
+				}
 			}
 		})
 
 		b.Run(fmt.Sprintf("Get/%d", size), func(b *testing.B) {
-			c := fastcache.New[string, []byte](12 * size)
+			c, err := fastcache.New[string, []byte](12 * size)
+			if err != nil {
+				b.Fatalf("fastcache.New error: %s", err)
+			}
 			defer c.Reset()
 
 			// Pre-populate
 			for i := range maxItems {
-				c.Set(stringKeys[i], data.values[i])
+				if err := c.Set(stringKeys[i], data.values[i]); err != nil {
+					b.Fatalf("Set error: %s", err)
+				}
 			}
 
 			b.ReportAllocs()
@@ -199,25 +209,35 @@ func BenchmarkFastcacheFork(b *testing.B) {
 		})
 
 		b.Run(fmt.Sprintf("SetGet/%d", size), func(b *testing.B) {
-			c := fastcache.New[string, []byte](12 * size)
+			c, err := fastcache.New[string, []byte](12 * size)
+			if err != nil {
+				b.Fatalf("fastcache.New error: %s", err)
+			}
 			defer c.Reset()
 
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				idx := i % maxItems
-				c.Set(stringKeys[idx], data.values[idx])
+				if err := c.Set(stringKeys[idx], data.values[idx]); err != nil {
+					b.Fatalf("Set error: %s", err)
+				}
 				c.Get(stringKeys[idx])
 			}
 		})
 
 		b.Run(fmt.Sprintf("GetParallel/%d", size), func(b *testing.B) {
-			c := fastcache.New[string, []byte](12 * size)
+			c, err := fastcache.New[string, []byte](12 * size)
+			if err != nil {
+				b.Fatalf("fastcache.New error: %s", err)
+			}
 			defer c.Reset()
 
 			// Pre-populate
 			for i := range maxItems {
-				c.Set(stringKeys[i], data.values[i])
+				if err := c.Set(stringKeys[i], data.values[i]); err != nil {
+					b.Fatalf("Set error: %s", err)
+				}
 			}
 
 			var start atomic.Int64
@@ -236,7 +256,10 @@ func BenchmarkFastcacheFork(b *testing.B) {
 		})
 
 		b.Run(fmt.Sprintf("SetParallel/%d", size), func(b *testing.B) {
-			c := fastcache.New[string, []byte](12 * size)
+			c, err := fastcache.New[string, []byte](12 * size)
+			if err != nil {
+				b.Fatalf("fastcache.New error: %s", err)
+			}
 			defer c.Reset()
 
 			var start atomic.Int64
@@ -245,7 +268,9 @@ func BenchmarkFastcacheFork(b *testing.B) {
 			b.RunParallel(func(pb *testing.PB) {
 				idx := int(start.Add(1)-1) % maxItems
 				for pb.Next() {
-					c.Set(stringKeys[idx], data.values[idx])
+					if err := c.Set(stringKeys[idx], data.values[idx]); err != nil {
+						b.Fatalf("Set error: %s", err)
+					}
 					idx++
 					if idx == maxItems {
 						idx = 0

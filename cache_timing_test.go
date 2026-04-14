@@ -8,7 +8,10 @@ import (
 )
 
 func BenchmarkCacheSet(b *testing.B) {
-	c := New[string, string](b.N * 2)
+	c, err := New[string, string](b.N * 2)
+	if err != nil {
+		b.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	b.ReportAllocs()
@@ -16,18 +19,25 @@ func BenchmarkCacheSet(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
-		c.Set(k, v)
+		if err := c.Set(k, v); err != nil {
+			b.Fatalf("Set error: %s", err)
+		}
 	}
 }
 
 func BenchmarkCacheGet(b *testing.B) {
-	c := New[string, string](b.N * 2)
+	c, err := New[string, string](b.N * 2)
+	if err != nil {
+		b.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	for i := 0; i < b.N; i++ {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
-		c.Set(k, v)
+		if err := c.Set(k, v); err != nil {
+			b.Fatalf("Set error: %s", err)
+		}
 	}
 
 	b.ReportAllocs()
@@ -39,7 +49,10 @@ func BenchmarkCacheGet(b *testing.B) {
 }
 
 func BenchmarkCacheSetGet(b *testing.B) {
-	c := New[string, string](b.N * 2)
+	c, err := New[string, string](b.N * 2)
+	if err != nil {
+		b.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	b.ReportAllocs()
@@ -47,13 +60,18 @@ func BenchmarkCacheSetGet(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
-		c.Set(k, v)
+		if err := c.Set(k, v); err != nil {
+			b.Fatalf("Set error: %s", err)
+		}
 		c.Get(k)
 	}
 }
 
 func BenchmarkCacheSetGetConcurrent(b *testing.B) {
-	c := New[string, string](b.N * 2)
+	c, err := New[string, string](b.N * 2)
+	if err != nil {
+		b.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	b.ReportAllocs()
@@ -63,7 +81,9 @@ func BenchmarkCacheSetGetConcurrent(b *testing.B) {
 		for pb.Next() {
 			k := fmt.Sprintf("key %d", i)
 			v := fmt.Sprintf("value %d", i)
-			c.Set(k, v)
+			if err := c.Set(k, v); err != nil {
+				b.Fatalf("Set error: %s", err)
+			}
 			c.Get(k)
 			i++
 		}
@@ -71,14 +91,19 @@ func BenchmarkCacheSetGetConcurrent(b *testing.B) {
 }
 
 func BenchmarkCacheGetConcurrent(b *testing.B) {
-	c := New[string, string](1000000)
+	c, err := New[string, string](1000000)
+	if err != nil {
+		b.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	// Pre-populate
 	for i := range 1000000 {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
-		c.Set(k, v)
+		if err := c.Set(k, v); err != nil {
+			b.Fatalf("Set error: %s", err)
+		}
 	}
 
 	var counter atomic.Int64
@@ -94,7 +119,10 @@ func BenchmarkCacheGetConcurrent(b *testing.B) {
 }
 
 func BenchmarkCacheSetBytes(b *testing.B) {
-	c := New[string, []byte](b.N * 2)
+	c, err := New[string, []byte](b.N * 2)
+	if err != nil {
+		b.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	value := make([]byte, 100)
@@ -106,12 +134,17 @@ func BenchmarkCacheSetBytes(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		k := fmt.Sprintf("key %d", i)
-		c.Set(k, value)
+		if err := c.Set(k, value); err != nil {
+			b.Fatalf("Set error: %s", err)
+		}
 	}
 }
 
 func BenchmarkCacheGetBytes(b *testing.B) {
-	c := New[string, []byte](b.N * 2)
+	c, err := New[string, []byte](b.N * 2)
+	if err != nil {
+		b.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	value := make([]byte, 100)
@@ -121,7 +154,9 @@ func BenchmarkCacheGetBytes(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		k := fmt.Sprintf("key %d", i)
-		c.Set(k, value)
+		if err := c.Set(k, value); err != nil {
+			b.Fatalf("Set error: %s", err)
+		}
 	}
 
 	b.ReportAllocs()
@@ -133,25 +168,35 @@ func BenchmarkCacheGetBytes(b *testing.B) {
 }
 
 func BenchmarkCacheIntKey(b *testing.B) {
-	c := New[int, string](b.N * 2)
+	c, err := New[int, string](b.N * 2)
+	if err != nil {
+		b.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		c.Set(i, "value")
+		if err := c.Set(i, "value"); err != nil {
+			b.Fatalf("Set error: %s", err)
+		}
 		c.Get(i)
 	}
 }
 
 func BenchmarkCacheUint64Key(b *testing.B) {
-	c := New[uint64, string](b.N * 2)
+	c, err := New[uint64, string](b.N * 2)
+	if err != nil {
+		b.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		c.Set(uint64(i), "value")
+		if err := c.Set(uint64(i), "value"); err != nil {
+			b.Fatalf("Set error: %s", err)
+		}
 		c.Get(uint64(i))
 	}
 }

@@ -37,11 +37,21 @@ import (
 
 func main() {
     // create a cache with max 10000 entries
-    c := fastcache.New[string, int](10000)
+    c, err := fastcache.New[string, int](10000)
+    if err != nil {
+        fmt.Println("create cache:", err)
+        return
+    }
 
     // set values
-    c.Set("foo", 123)
-    c.Set("bar", 456)
+    if err := c.Set("foo", 123); err != nil {
+        fmt.Println("set foo:", err)
+        return
+    }
+    if err := c.Set("bar", 456); err != nil {
+        fmt.Println("set bar:", err)
+        return
+    }
 
     // get values
     if v, ok := c.Get("foo"); ok {
@@ -67,11 +77,20 @@ func main() {
     }
 
     // atomic get-or-set
-    actual, loaded := c.GetOrSet("baz", 789)
+    actual, loaded, err := c.GetOrSet("baz", 789)
+    if err != nil {
+        fmt.Println("get or set baz:", err)
+        return
+    }
     fmt.Printf("value=%d, existed=%v\n", actual, loaded)
 
     // atomic set-if-absent
-    if c.SetIfAbsent("qux", 101112) {
+    stored, err := c.SetIfAbsent("qux", 101112)
+    if err != nil {
+        fmt.Println("set if absent qux:", err)
+        return
+    }
+    if stored {
         fmt.Println("qux was set")
     }
 
@@ -87,13 +106,15 @@ func main() {
 
     // save to file
     if err := c.SaveToFile("/tmp/cache.bin"); err != nil {
-        panic(err)
+	    fmt.Println("save cache:", err)
+	    return
     }
 
     // load from file
     c2, err := fastcache.LoadFromFile[string, int]("/tmp/cache.bin")
     if err != nil {
-        panic(err)
+	    fmt.Println("load cache:", err)
+	    return
     }
     defer c2.Reset()
 }

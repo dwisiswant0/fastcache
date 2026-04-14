@@ -16,16 +16,22 @@ func ExampleCache_SaveToFile() {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	filePath := filepath.Join(tmpDir, "cache.dat")
 
-	cache := fastcache.New[string, int](100)
+	cache, err := fastcache.New[string, int](100)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	// Add some data
-	cache.Set("users", 1000)
-	cache.Set("posts", 5000)
+	if err := cache.Set("users", 1000); err != nil {
+		return
+	}
+	if err := cache.Set("posts", 5000); err != nil {
+		return
+	}
 
 	// Save to file
-	err := cache.SaveToFile(filePath)
-	if err != nil {
+	if err := cache.SaveToFile(filePath); err != nil {
 		fmt.Println("Error saving:", err)
 		return
 	}
@@ -44,11 +50,17 @@ func ExampleLoadFromFile() {
 	filePath := filepath.Join(tmpDir, "cache.dat")
 
 	// First, create and save a cache
-	cache := fastcache.New[string, string](100)
-	cache.Set("greeting", "hello")
-	cache.Set("language", "Go")
-	err := cache.SaveToFile(filePath)
+	cache, err := fastcache.New[string, string](100)
 	if err != nil {
+		return
+	}
+	if err := cache.Set("greeting", "hello"); err != nil {
+		return
+	}
+	if err := cache.Set("language", "Go"); err != nil {
+		return
+	}
+	if err := cache.SaveToFile(filePath); err != nil {
 		fmt.Println("Error saving:", err)
 		return
 	}
@@ -82,7 +94,10 @@ func ExampleLoadFromFileOrNew() {
 	filePath := filepath.Join(tmpDir, "cache.dat")
 
 	// File doesn't exist, so it creates a new cache
-	cache := fastcache.LoadFromFileOrNew[string, int](filePath, 50)
+	cache, err := fastcache.LoadFromFileOrNew[string, int](filePath, 50)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	fmt.Printf("New cache created with capacity: %d\n", 50)
@@ -95,15 +110,19 @@ func ExampleLoadFromFileOrNew() {
 
 // ExampleCache_SaveTo demonstrates saving to a writer.
 func ExampleCache_SaveTo() {
-	cache := fastcache.New[string, string](10)
+	cache, err := fastcache.New[string, string](10)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
-	cache.Set("example", "data")
+	if err := cache.Set("example", "data"); err != nil {
+		return
+	}
 
 	// Save to a buffer (could be any io.Writer)
 	var buf bytes.Buffer
-	err := cache.SaveTo(&buf)
-	if err != nil {
+	if err := cache.SaveTo(&buf); err != nil {
 		fmt.Println("Error saving:", err)
 		return
 	}
@@ -117,12 +136,16 @@ func ExampleCache_SaveTo() {
 // ExampleLoadFrom demonstrates loading from a reader.
 func ExampleLoadFrom() {
 	// First create some data in a buffer
-	cache := fastcache.New[string, int](10)
-	cache.Set("count", 42)
+	cache, err := fastcache.New[string, int](10)
+	if err != nil {
+		return
+	}
+	if err := cache.Set("count", 42); err != nil {
+		return
+	}
 
 	var buf bytes.Buffer
-	err := cache.SaveTo(&buf)
-	if err != nil {
+	if err := cache.SaveTo(&buf); err != nil {
 		fmt.Println("Error saving:", err)
 		return
 	}
@@ -150,17 +173,21 @@ func ExampleCache_SaveToFileConcurrent() {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	filePath := filepath.Join(tmpDir, "cache.dat")
 
-	cache := fastcache.New[int, string](1000)
+	cache, err := fastcache.New[int, string](1000)
+	if err != nil {
+		return
+	}
 	defer cache.Reset()
 
 	// Add many entries
 	for i := range 100 {
-		cache.Set(i, fmt.Sprintf("value-%d", i))
+		if err := cache.Set(i, fmt.Sprintf("value-%d", i)); err != nil {
+			return
+		}
 	}
 
 	// Save using 4 concurrent workers
-	err := cache.SaveToFileConcurrent(filePath, 4)
-	if err != nil {
+	if err := cache.SaveToFileConcurrent(filePath, 4); err != nil {
 		fmt.Println("Error saving:", err)
 		return
 	}
