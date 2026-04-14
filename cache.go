@@ -49,9 +49,11 @@ const shardMask = uint64(shardsCount - 1)
 //
 // maxEntries is the maximum number of entries the cache can hold.
 // When the cache is full, the oldest entries are evicted (FIFO).
-func New[K comparable, V any](maxEntries int) *Cache[K, V] {
+//
+// New returns an error if maxEntries is not positive.
+func New[K comparable, V any](maxEntries int) (*Cache[K, V], error) {
 	if maxEntries <= 0 {
-		panic(fmt.Errorf("maxEntries must be greater than 0; got %d", maxEntries))
+		return nil, fmt.Errorf("%w: got %d", ErrInvalidMaxEntries, maxEntries)
 	}
 
 	c := &Cache[K, V]{
@@ -65,16 +67,19 @@ func New[K comparable, V any](maxEntries int) *Cache[K, V] {
 		c.shards[i].entries = make(map[uint64][]entry[K, V], entriesPerShard)
 	}
 
-	return c
+	return c, nil
 }
 
 // Set stores (k, v) in the cache.
 //
 // The stored entry may be evicted at any time due to cache overflow.
-func (c *Cache[K, V]) Set(k K, v V) {
+//
+// Set returns an error if the cache cannot evict an existing entry while full.
+func (c *Cache[K, V]) Set(k K, v V) error {
 	h := c.hasher(k)
 	idx := c.shardIndexFromHash(h)
-	c.shards[idx].set(c, idx, h, k, v)
+
+	return c.shards[idx].set(c, idx, h, k, v)
 }
 
 // Get returns the value for the given key.
@@ -98,7 +103,9 @@ func (c *Cache[K, V]) Has(k K) bool {
 // Otherwise, it stores and returns the given value.
 //
 // The loaded result is true if the value was loaded, false if stored.
-func (c *Cache[K, V]) GetOrSet(k K, v V) (actual V, loaded bool) {
+//
+// GetOrSet returns an error if the cache cannot evict an existing entry while full.
+func (c *Cache[K, V]) GetOrSet(k K, v V) (actual V, loaded bool, err error) {
 	h := c.hasher(k)
 	idx := c.shardIndexFromHash(h)
 
@@ -108,7 +115,9 @@ func (c *Cache[K, V]) GetOrSet(k K, v V) (actual V, loaded bool) {
 // SetIfAbsent stores the value for a key only if the key is not already present.
 //
 // Returns true if the value was stored, false if the key already existed.
-func (c *Cache[K, V]) SetIfAbsent(k K, v V) (stored bool) {
+//
+// SetIfAbsent returns an error if the cache cannot evict an existing entry while full.
+func (c *Cache[K, V]) SetIfAbsent(k K, v V) (stored bool, err error) {
 	h := c.hasher(k)
 	idx := c.shardIndexFromHash(h)
 
@@ -209,7 +218,7 @@ func hashStringKey[K comparable](k K) uint64 {
 	return rapidhash.HashString(any(k).(string))
 }
 
-func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) result[V] {
+func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) (result[V], error) {
 	c.orderMu.Lock()
 	defer c.orderMu.Unlock()
 
@@ -219,46 +228,57 @@ func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) result[V]
 
 		bucket := shard.entries[hash]
 		if pos := findEntry(bucket, k); pos >= 0 {
-			result := c.handleExisting(op, shard, bucket, pos, v)
+			result, err := c.handleExisting(op, shard, bucket, pos, v)
 			shard.mu.Unlock()
 
-			return result
+			return result, err
 		}
 
 		if c.entryCount.Load() < int64(c.maxEntries) {
-			result := c.handleInsert(op, idx, hash, k, v, shard, bucket)
+			result, err := c.handleInsert(op, idx, hash, k, v, shard, bucket)
 			shard.mu.Unlock()
 
-			return result
+			return result, err
 		}
 		shard.mu.Unlock()
 
 		if !c.evictOldestLocked() {
-			panic("fastcache: failed to evict while cache is full")
+			return result[V]{}, fmt.Errorf("%w: entry count=%d, max entries=%d", ErrEvictionFailed, c.entryCount.Load(), c.maxEntries)
 		}
 	}
 }
 
-func (c *Cache[K, V]) handleExisting(op op, shard *shard[K, V], bucket []entry[K, V], pos int, v V) result[V] {
+func (c *Cache[K, V]) handleExisting(op op, shard *shard[K, V], bucket []entry[K, V], pos int, v V) (result[V], error) {
 	switch op {
 	case opSet:
 		bucket[pos].Value = v
 
-		return result[V]{}
+		return result[V]{}, nil
 	case opGetOrSet:
 		shard.getCalls++
 
-		return result[V]{value: bucket[pos].Value, loaded: true}
+		return result[V]{value: bucket[pos].Value, loaded: true}, nil
 	case opSetIfAbsent:
-		return result[V]{}
+		return result[V]{}, nil
 	default:
-		panic("fastcache: unknown operation")
+		return result[V]{}, fmt.Errorf("%w: %d", errUnknownOp, op)
 	}
 }
 
-func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard *shard[K, V], bucket []entry[K, V]) result[V] {
-	if op != opSet {
+func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard *shard[K, V], bucket []entry[K, V]) (result[V], error) {
+	var res result[V]
+
+	switch op {
+	case opSet:
+		res = result[V]{}
+	case opGetOrSet:
 		shard.setCalls++
+		res = result[V]{value: v}
+	case opSetIfAbsent:
+		shard.setCalls++
+		res = result[V]{stored: true}
+	default:
+		return result[V]{}, fmt.Errorf("%w: %d", errUnknownOp, op)
 	}
 
 	shard.entries[hash] = append(bucket, entry[K, V]{Key: k, Value: v})
@@ -266,16 +286,7 @@ func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard 
 	c.order = append(c.order, slot[K]{shard: idx, hash: hash, key: k})
 	c.entryCount.Add(1)
 
-	switch op {
-	case opSet:
-		return result[V]{}
-	case opGetOrSet:
-		return result[V]{value: v}
-	case opSetIfAbsent:
-		return result[V]{stored: true}
-	default:
-		panic("fastcache: unknown operation")
-	}
+	return res, nil
 }
 
 func (c *Cache[K, V]) evictOldestLocked() bool {

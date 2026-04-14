@@ -1,6 +1,7 @@
 package fastcache
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -9,14 +10,19 @@ import (
 )
 
 func TestCacheSmall(t *testing.T) {
-	c := New[string, string](100)
+	c, err := New[string, string](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	if _, ok := c.Get("aaa"); ok {
 		t.Fatalf("unexpected value found for non-existent key")
 	}
 
-	c.Set("key", "value")
+	if err := c.Set("key", "value"); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
 	if v, ok := c.Get("key"); !ok || v != "value" {
 		t.Fatalf("unexpected value obtained; got %q; want %q", v, "value")
 	}
@@ -27,7 +33,9 @@ func TestCacheSmall(t *testing.T) {
 		t.Fatalf("unexpected value found for non-existent key")
 	}
 
-	c.Set("aaa", "bbb")
+	if err := c.Set("aaa", "bbb"); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
 	if v, ok := c.Get("aaa"); !ok || v != "bbb" {
 		t.Fatalf("unexpected value obtained; got %q; want %q", v, "bbb")
 	}
@@ -37,9 +45,10 @@ func TestCacheSmall(t *testing.T) {
 		t.Fatalf("unexpected value found after reset")
 	}
 
-	// Test empty value
 	k := "empty"
-	c.Set(k, "")
+	if err := c.Set(k, ""); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
 	if v, ok := c.Get(k); !ok {
 		t.Fatalf("cannot find empty entry for key %q", k)
 	} else if v != "" {
@@ -54,20 +63,28 @@ func TestCacheSmall(t *testing.T) {
 }
 
 func TestCacheStringBytes(t *testing.T) {
-	c := New[string, []byte](100)
+	c, err := New[string, []byte](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	key := "key"
 	value := []byte("value")
 
-	c.Set(key, value)
+	if err := c.Set(key, value); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
 	if v, ok := c.Get(key); !ok || string(v) != string(value) {
 		t.Fatalf("unexpected value obtained; got %q; want %q", v, value)
 	}
 }
 
 func TestCacheWrap(t *testing.T) {
-	c := New[string, string](1000)
+	c, err := New[string, string](1000)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	calls := 5000
@@ -75,7 +92,9 @@ func TestCacheWrap(t *testing.T) {
 	for i := range calls {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
-		c.Set(k, v)
+		if err := c.Set(k, v); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 		vv, ok := c.Get(k)
 		if !ok || vv != v {
 			t.Fatalf("unexpected value for key %q; got %q; want %q", k, vv, v)
@@ -105,13 +124,18 @@ func TestCacheWrap(t *testing.T) {
 }
 
 func TestCacheDel(t *testing.T) {
-	c := New[string, string](1024)
+	c, err := New[string, string](1024)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	for i := range 100 {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
-		c.Set(k, v)
+		if err := c.Set(k, v); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 		vv, ok := c.Get(k)
 		if !ok || vv != v {
 			t.Fatalf("unexpected value for key %q; got %q; want %q", k, vv, v)
@@ -124,11 +148,17 @@ func TestCacheDel(t *testing.T) {
 }
 
 func TestCacheGetOrSet(t *testing.T) {
-	c := New[string, string](100)
+	c, err := New[string, string](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	// First call should store and return loaded=false
-	actual, loaded := c.GetOrSet("key1", "value1")
+	actual, loaded, err := c.GetOrSet("key1", "value1")
+	if err != nil {
+		t.Fatalf("GetOrSet error: %s", err)
+	}
 	if loaded {
 		t.Fatal("expected loaded=false for new key")
 	}
@@ -137,7 +167,10 @@ func TestCacheGetOrSet(t *testing.T) {
 	}
 
 	// Second call should return existing and loaded=true
-	actual, loaded = c.GetOrSet("key1", "value2")
+	actual, loaded, err = c.GetOrSet("key1", "value2")
+	if err != nil {
+		t.Fatalf("GetOrSet error: %s", err)
+	}
 	if !loaded {
 		t.Fatal("expected loaded=true for existing key")
 	}
@@ -152,7 +185,10 @@ func TestCacheGetOrSet(t *testing.T) {
 	}
 
 	// Test with different key
-	actual, loaded = c.GetOrSet("key2", "value2")
+	actual, loaded, err = c.GetOrSet("key2", "value2")
+	if err != nil {
+		t.Fatalf("GetOrSet error: %s", err)
+	}
 	if loaded {
 		t.Fatal("expected loaded=false for new key2")
 	}
@@ -162,7 +198,10 @@ func TestCacheGetOrSet(t *testing.T) {
 }
 
 func TestCacheGetAndDelete(t *testing.T) {
-	c := New[string, string](100)
+	c, err := New[string, string](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	// GetAndDelete on non-existent key
@@ -175,7 +214,9 @@ func TestCacheGetAndDelete(t *testing.T) {
 	}
 
 	// Set a key, then GetAndDelete
-	c.Set("key1", "value1")
+	if err := c.Set("key1", "value1"); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
 	v, loaded = c.GetAndDelete("key1")
 	if !loaded {
 		t.Fatal("expected loaded=true for existing key")
@@ -197,11 +238,18 @@ func TestCacheGetAndDelete(t *testing.T) {
 }
 
 func TestCacheSetIfAbsent(t *testing.T) {
-	c := New[string, string](100)
+	c, err := New[string, string](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	// First SetIfAbsent should succeed
-	if !c.SetIfAbsent("key1", "value1") {
+	stored, err := c.SetIfAbsent("key1", "value1")
+	if err != nil {
+		t.Fatalf("SetIfAbsent error: %s", err)
+	}
+	if !stored {
 		t.Fatal("expected stored=true for new key")
 	}
 
@@ -212,7 +260,11 @@ func TestCacheSetIfAbsent(t *testing.T) {
 	}
 
 	// Second SetIfAbsent should fail (key exists)
-	if c.SetIfAbsent("key1", "value2") {
+	stored, err = c.SetIfAbsent("key1", "value2")
+	if err != nil {
+		t.Fatalf("SetIfAbsent error: %s", err)
+	}
+	if stored {
 		t.Fatal("expected stored=false for existing key")
 	}
 
@@ -224,7 +276,11 @@ func TestCacheSetIfAbsent(t *testing.T) {
 
 	// After delete, SetIfAbsent should succeed again
 	c.Delete("key1")
-	if !c.SetIfAbsent("key1", "value3") {
+	stored, err = c.SetIfAbsent("key1", "value3")
+	if err != nil {
+		t.Fatalf("SetIfAbsent error: %s", err)
+	}
+	if !stored {
 		t.Fatal("expected stored=true after key was deleted")
 	}
 
@@ -236,7 +292,10 @@ func TestCacheSetIfAbsent(t *testing.T) {
 
 func TestCacheSetGetSerial(t *testing.T) {
 	itemsCount := 10000
-	c := New[string, string](itemsCount * 2)
+	c, err := New[string, string](itemsCount * 2)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 	if err := testCacheGetSet(c, itemsCount); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -246,7 +305,10 @@ func TestCacheSetGetSerial(t *testing.T) {
 func TestCacheGetSetConcurrent(t *testing.T) {
 	itemsCount := 10000
 	const goroutines = 10
-	c := New[string, string](itemsCount * goroutines * 2)
+	c, err := New[string, string](itemsCount * goroutines * 2)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	ch := make(chan error, goroutines)
@@ -271,7 +333,9 @@ func testCacheGetSet(c *Cache[string, string], itemsCount int) error {
 	for i := range itemsCount {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
-		c.Set(k, v)
+		if err := c.Set(k, v); err != nil {
+			return fmt.Errorf("cannot set %q: %w", k, err)
+		}
 		vv, ok := c.Get(k)
 		if !ok || vv != v {
 			return fmt.Errorf("unexpected value for key %q after insertion; got %q; want %q", k, vv, v)
@@ -297,7 +361,10 @@ func testCacheGetSet(c *Cache[string, string], itemsCount int) error {
 }
 
 func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
-	c := New[string, string](12334)
+	c, err := New[string, string](12334)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 
 	stopCh := make(chan struct{})
 
@@ -347,7 +414,10 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 			for j := range 100 {
 				key := fmt.Sprintf("key_%d", j)
 				value := fmt.Sprintf("value_%d", j)
-				c.Set(key, value)
+				if err := c.Set(key, value); err != nil {
+					t.Errorf("Set(%q) error: %s", key, err)
+					return
+				}
 				runtime.Gosched()
 			}
 		}()
@@ -361,12 +431,17 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 }
 
 func TestCacheRange(t *testing.T) {
-	c := New[string, string](100)
+	c, err := New[string, string](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	// Add entries
 	for i := range 50 {
-		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
+		if err := c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i)); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 	}
 
 	// Count entries via All
@@ -394,12 +469,17 @@ func TestCacheRange(t *testing.T) {
 }
 
 func TestCacheKeys(t *testing.T) {
-	c := New[string, string](100)
+	c, err := New[string, string](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	// Add entries
 	for i := range 50 {
-		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
+		if err := c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i)); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 	}
 
 	// Collect all keys
@@ -434,12 +514,17 @@ func TestCacheKeys(t *testing.T) {
 }
 
 func TestCacheValues(t *testing.T) {
-	c := New[string, string](100)
+	c, err := New[string, string](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	// Add entries
 	for i := range 50 {
-		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
+		if err := c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i)); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 	}
 
 	// Collect all values
@@ -474,7 +559,10 @@ func TestCacheValues(t *testing.T) {
 }
 
 func TestCacheLen(t *testing.T) {
-	c := New[string, string](100)
+	c, err := New[string, string](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	if c.Len() != 0 {
@@ -482,7 +570,9 @@ func TestCacheLen(t *testing.T) {
 	}
 
 	for i := range 50 {
-		c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
+		if err := c.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i)); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 	}
 
 	if c.Len() != 50 {
@@ -501,11 +591,16 @@ func TestCacheStruct(t *testing.T) {
 		Name string
 	}
 
-	c := New[int, User](100)
+	c, err := New[int, User](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	u := User{ID: 1, Name: "Alice"}
-	c.Set(1, u)
+	if err := c.Set(1, u); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
 
 	got, ok := c.Get(1)
 	if !ok {
@@ -519,14 +614,19 @@ func TestCacheStruct(t *testing.T) {
 func TestCacheHandlesForcedShardCollisions(t *testing.T) {
 	const maxEntries = 8
 
-	c := New[string, string](maxEntries)
+	c, err := New[string, string](maxEntries)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	c.hasher = func(string) uint64 { return 1 }
 	defer c.Reset()
 
 	for i := range maxEntries * 2 {
 		key := fmt.Sprintf("key-%d", i)
 		value := fmt.Sprintf("value-%d", i)
-		c.Set(key, value)
+		if err := c.Set(key, value); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 	}
 
 	if c.Len() != maxEntries {
@@ -550,11 +650,18 @@ func TestCacheHandlesForcedShardCollisions(t *testing.T) {
 		}
 	}
 
-	if stored := c.SetIfAbsent("key-12", "newer"); stored {
+	stored, err := c.SetIfAbsent("key-12", "newer")
+	if err != nil {
+		t.Fatalf("SetIfAbsent error: %s", err)
+	}
+	if stored {
 		t.Fatal("SetIfAbsent unexpectedly overwrote an existing forced-collision key")
 	}
 
-	actual, loaded := c.GetOrSet("key-12", "newer")
+	actual, loaded, err := c.GetOrSet("key-12", "newer")
+	if err != nil {
+		t.Fatalf("GetOrSet error: %s", err)
+	}
 	if !loaded || actual != "value-12" {
 		t.Fatalf("GetOrSet returned (%q, %t); want (%q, true)", actual, loaded, "value-12")
 	}
@@ -567,7 +674,11 @@ func TestCacheHandlesForcedShardCollisions(t *testing.T) {
 		t.Fatal("forced-collision key still present after GetAndDelete")
 	}
 
-	if !c.SetIfAbsent("key-12", "replacement") {
+	stored, err = c.SetIfAbsent("key-12", "replacement")
+	if err != nil {
+		t.Fatalf("SetIfAbsent error: %s", err)
+	}
+	if !stored {
 		t.Fatal("SetIfAbsent failed after deleting a forced-collision key")
 	}
 	if got, ok := c.Get("key-12"); !ok || got != "replacement" {
@@ -576,7 +687,10 @@ func TestCacheHandlesForcedShardCollisions(t *testing.T) {
 }
 
 func TestCacheEnforcesGlobalCapacityAcrossShards(t *testing.T) {
-	c := New[string, string](4)
+	c, err := New[string, string](4)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	c.hasher = func(k string) uint64 {
 		if k[0] == 'a' {
 			return 1
@@ -588,10 +702,14 @@ func TestCacheEnforcesGlobalCapacityAcrossShards(t *testing.T) {
 
 	for i := range 4 {
 		key := fmt.Sprintf("a%d", i)
-		c.Set(key, key)
+		if err := c.Set(key, key); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 	}
 
-	c.Set("b0", "b0")
+	if err := c.Set("b0", "b0"); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
 
 	if c.Len() != 4 {
 		t.Fatalf("unexpected len after cross-shard insertion at capacity; got %d; want 4", c.Len())
@@ -605,5 +723,39 @@ func TestCacheEnforcesGlobalCapacityAcrossShards(t *testing.T) {
 		if !ok || got != key {
 			t.Fatalf("unexpected value for key %q; got (%q, %t)", key, got, ok)
 		}
+	}
+}
+
+func TestNewReturnsErrorForInvalidMaxEntries(t *testing.T) {
+	cache, err := New[string, string](0)
+	if !errors.Is(err, ErrInvalidMaxEntries) {
+		t.Fatalf("New returned error %v; want %v", err, ErrInvalidMaxEntries)
+	}
+	if cache != nil {
+		t.Fatal("New returned non-nil cache for invalid maxEntries")
+	}
+}
+
+func TestCacheSetReturnsErrorWhenEvictionFails(t *testing.T) {
+	c, err := New[string, string](1)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	c.hasher = func(string) uint64 { return 1 }
+	c.shards[1].entries[1] = []entry[string, string]{{Key: "stale", Value: "value"}}
+	c.shards[1].entryCount = 1
+	c.entryCount.Store(1)
+
+	err = c.Set("fresh", "value")
+	if !errors.Is(err, ErrEvictionFailed) {
+		t.Fatalf("Set returned error %v; want %v", err, ErrEvictionFailed)
+	}
+	if _, ok := c.Get("fresh"); ok {
+		t.Fatal("Set inserted a key despite eviction failure")
+	}
+	if got := c.Len(); got != 1 {
+		t.Fatalf("unexpected len after eviction failure; got %d; want 1", got)
 	}
 }

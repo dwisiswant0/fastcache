@@ -19,12 +19,17 @@ func TestSaveLoadSmall(t *testing.T) {
 		_ = os.RemoveAll(tmpDir)
 	}()
 
-	c := New[string, string](100)
+	c, err := New[string, string](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	defer c.Reset()
 
 	key := "foobar"
 	value := "abcdef"
-	c.Set(key, value)
+	if err := c.Set(key, value); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
 	if err := c.SaveToFile(filePath); err != nil {
 		t.Fatalf("SaveToFile error: %s", err)
 	}
@@ -40,7 +45,9 @@ func TestSaveLoadSmall(t *testing.T) {
 
 	// Verify that key can be overwritten.
 	newValue := "234fdfd"
-	c1.Set(key, newValue)
+	if err := c1.Set(key, newValue); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
 	vv, ok = c1.Get(key)
 	if !ok || vv != newValue {
 		t.Fatalf("unexpected new value obtained from cache; got %q; want %q", vv, newValue)
@@ -80,11 +87,16 @@ func testSaveLoadFile(t *testing.T, concurrency int) {
 	}()
 
 	const itemsCount = 10000
-	c := New[string, string](itemsCount * 2)
+	c, err := New[string, string](itemsCount * 2)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 	for i := range itemsCount {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
-		c.Set(k, v)
+		if err := c.Set(k, v); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 		vv, ok := c.Get(k)
 		if !ok || v != vv {
 			t.Fatalf("unexpected cache value for k=%q; got %q; want %q", k, vv, v)
@@ -127,7 +139,10 @@ func testSaveLoadFile(t *testing.T, concurrency int) {
 	c.Reset()
 
 	// Verify LoadFromFileOrNew
-	c = LoadFromFileOrNew[string, string](filePath, itemsCount*2)
+	c, err = LoadFromFileOrNew[string, string](filePath, itemsCount*2)
+	if err != nil {
+		t.Fatalf("LoadFromFileOrNew error: %s", err)
+	}
 	s.Reset()
 	c.UpdateStats(&s)
 	if s.EntriesCount != itemsCount {
@@ -160,7 +175,10 @@ func TestSaveLoadStruct(t *testing.T) {
 		_ = os.RemoveAll(tmpDir)
 	}()
 
-	c := New[int, User](100)
+	c, err := New[int, User](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 
 	users := []User{
 		{ID: 1, Name: "Alice", Tags: []string{"admin", "user"}},
@@ -169,7 +187,9 @@ func TestSaveLoadStruct(t *testing.T) {
 	}
 
 	for _, u := range users {
-		c.Set(u.ID, u)
+		if err := c.Set(u.ID, u); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 	}
 
 	if err := c.SaveToFile(filePath); err != nil {
@@ -196,7 +216,10 @@ func TestSaveLoadStruct(t *testing.T) {
 }
 
 func TestLoadFromFileOrNew_NonExistent(t *testing.T) {
-	c := LoadFromFileOrNew[string, string]("non-existing-file", 100)
+	c, err := LoadFromFileOrNew[string, string]("non-existing-file", 100)
+	if err != nil {
+		t.Fatalf("LoadFromFileOrNew error: %s", err)
+	}
 	if c == nil {
 		t.Fatal("LoadFromFileOrNew returned nil")
 	}
@@ -207,7 +230,9 @@ func TestLoadFromFileOrNew_NonExistent(t *testing.T) {
 	}
 
 	// Should be usable
-	c.Set("key", "value")
+	if err := c.Set("key", "value"); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
 	if v, ok := c.Get("key"); !ok || v != "value" {
 		t.Fatalf("unexpected value; got %q; want %q", v, "value")
 	}
@@ -215,12 +240,17 @@ func TestLoadFromFileOrNew_NonExistent(t *testing.T) {
 
 func TestSaveToLoadFrom(t *testing.T) {
 	const itemsCount = 1000
-	c := New[string, string](itemsCount * 2)
+	c, err := New[string, string](itemsCount * 2)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 
 	for i := range itemsCount {
 		k := fmt.Sprintf("key %d", i)
 		v := fmt.Sprintf("value %d", i)
-		c.Set(k, v)
+		if err := c.Set(k, v); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 	}
 
 	var buf bytes.Buffer
@@ -254,7 +284,10 @@ func TestSaveToLoadFrom_Struct(t *testing.T) {
 		Tags []string
 	}
 
-	c := New[int, User](100)
+	c, err := New[int, User](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
 
 	users := []User{
 		{ID: 1, Name: "Alice", Tags: []string{"admin", "user"}},
@@ -263,7 +296,9 @@ func TestSaveToLoadFrom_Struct(t *testing.T) {
 	}
 
 	for _, u := range users {
-		c.Set(u.ID, u)
+		if err := c.Set(u.ID, u); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
 	}
 
 	var buf bytes.Buffer
