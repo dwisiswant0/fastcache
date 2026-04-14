@@ -1,35 +1,49 @@
 package fastcache
 
 import (
-	"encoding/binary"
 	"fmt"
 	"iter"
+	"sync"
 	"sync/atomic"
 
 	"go.dw1.io/rapidhash"
 )
 
-// Cache is a fast thread-safe in-memory cache.
+// Cache is a fast thread-safe in-memory cache with FIFO eviction.
 //
 // Call [Cache.Reset] when the cache is no longer needed. This reclaims the allocated
 // memory.
 type Cache[K comparable, V any] struct {
 	shards     [shardsCount]shard[K, V]
+	hasher     func(K) uint64
 	maxEntries int
+	orderMu    sync.Mutex
+	order      []slot[K]
+	head       int
 	entryCount atomic.Int64 // global entry count for accurate capacity enforcement
 }
 
-// keySlot holds a key and whether it's valid (not deleted)
-type keySlot[K comparable] struct {
+type slot[K comparable] struct {
+	shard int
+	hash  uint64
 	key   K
-	valid bool
 }
 
+type op uint8
+
 const (
-	shardMask             = shardsCount - 1
-	stringShardSampleSize = 16
-	stringShardSamples    = 4
+	opSet op = iota
+	opGetOrSet
+	opSetIfAbsent
 )
+
+type result[V any] struct {
+	value  V
+	loaded bool
+	stored bool
+}
+
+const shardMask = uint64(shardsCount - 1)
 
 // New returns a new cache with the given maxEntries capacity.
 //
@@ -42,16 +56,13 @@ func New[K comparable, V any](maxEntries int) *Cache[K, V] {
 
 	c := &Cache[K, V]{
 		maxEntries: maxEntries,
+		hasher:     newHasher[K](),
+		order:      make([]slot[K], 0, maxEntries),
 	}
 
 	entriesPerShard := (maxEntries + shardsCount - 1) / shardsCount
-	inlineCap := min(entriesPerShard, inlineShardEntries)
-
 	for i := range c.shards {
-		if inlineCap > 0 {
-			c.shards[i].smallEntries = make([]inlineEntry[K, V], 0, inlineCap)
-		}
-		c.shards[i].order = make([]keySlot[K], entriesPerShard)
+		c.shards[i].entries = make(map[uint64][]entry[K, V], entriesPerShard)
 	}
 
 	return c
@@ -61,17 +72,19 @@ func New[K comparable, V any](maxEntries int) *Cache[K, V] {
 //
 // The stored entry may be evicted at any time due to cache overflow.
 func (c *Cache[K, V]) Set(k K, v V) {
-	idx := shardIndex(k)
-	c.shards[idx].set(c, k, v)
+	h := c.hasher(k)
+	idx := c.shardIndexFromHash(h)
+	c.shards[idx].set(c, idx, h, k, v)
 }
 
 // Get returns the value for the given key.
 //
 // Returns the zero value and false if the key is not found.
 func (c *Cache[K, V]) Get(k K) (V, bool) {
-	idx := shardIndex(k)
+	h := c.hasher(k)
+	idx := c.shardIndexFromHash(h)
 
-	return c.shards[idx].get(k)
+	return c.shards[idx].get(h, k)
 }
 
 // Has returns true if entry for the given key exists in the cache.
@@ -86,41 +99,50 @@ func (c *Cache[K, V]) Has(k K) bool {
 //
 // The loaded result is true if the value was loaded, false if stored.
 func (c *Cache[K, V]) GetOrSet(k K, v V) (actual V, loaded bool) {
-	idx := shardIndex(k)
+	h := c.hasher(k)
+	idx := c.shardIndexFromHash(h)
 
-	return c.shards[idx].getOrSet(c, k, v)
+	return c.shards[idx].getOrSet(c, idx, h, k, v)
 }
 
 // SetIfAbsent stores the value for a key only if the key is not already present.
 //
 // Returns true if the value was stored, false if the key already existed.
 func (c *Cache[K, V]) SetIfAbsent(k K, v V) (stored bool) {
-	idx := shardIndex(k)
+	h := c.hasher(k)
+	idx := c.shardIndexFromHash(h)
 
-	return c.shards[idx].setIfAbsent(c, k, v)
+	return c.shards[idx].setIfAbsent(c, idx, h, k, v)
 }
 
 // Delete removes the value for the given key.
 func (c *Cache[K, V]) Delete(k K) {
-	idx := shardIndex(k)
-	c.shards[idx].delete(c, k)
+	h := c.hasher(k)
+	idx := c.shardIndexFromHash(h)
+	c.shards[idx].delete(c, h, k)
 }
 
 // GetAndDelete deletes the value for a key, returning the previous value if any.
 //
 // The loaded result reports whether the key was present.
 func (c *Cache[K, V]) GetAndDelete(k K) (v V, loaded bool) {
-	idx := shardIndex(k)
+	h := c.hasher(k)
+	idx := c.shardIndexFromHash(h)
 
-	return c.shards[idx].getAndDelete(c, k)
+	return c.shards[idx].getAndDelete(c, h, k)
 }
 
 // Reset removes all the items from the cache.
 func (c *Cache[K, V]) Reset() {
+	c.orderMu.Lock()
 	for i := range c.shards {
 		c.shards[i].reset()
 	}
+	clear(c.order)
+	c.order = c.order[:0]
+	c.head = 0
 	c.entryCount.Store(0)
+	c.orderMu.Unlock()
 }
 
 // Len returns the number of entries in the cache.
@@ -170,47 +192,129 @@ func (c *Cache[K, V]) Values() iter.Seq[V] {
 	}
 }
 
-func shardIndex[K comparable](k K) int {
-	return int(hashKey(k) & shardMask)
+func (c *Cache[K, V]) shardIndexFromHash(h uint64) int {
+	return int(h & shardMask)
 }
 
-// hashKey returns a hash for the given key.
-func hashKey[K comparable](k K) uint64 {
-	if s, ok := any(k).(string); ok {
-		return hashStringKey(s)
+func newHasher[K comparable]() func(K) uint64 {
+	var zero K
+	if _, ok := any(zero).(string); ok {
+		return hashStringKey[K]
 	}
 
-	return rapidhash.HashComparable(k)
+	return rapidhash.HashComparable[K]
 }
 
-func hashStringKey(s string) uint64 {
-	if len(s) <= stringShardSamples*stringShardSampleSize {
-		return rapidhash.HashStringNano(s)
-	}
+func hashStringKey[K comparable](k K) uint64 {
+	return rapidhash.HashString(any(k).(string))
+}
 
-	var sampled [8 + stringShardSamples*stringShardSampleSize]byte
-	binary.LittleEndian.PutUint64(sampled[:8], uint64(len(s)))
-	offset := 8
+func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) result[V] {
+	c.orderMu.Lock()
+	defer c.orderMu.Unlock()
 
-	starts := [stringShardSamples]int{
-		0,
-		len(s)/3 - stringShardSampleSize/2,
-		(2*len(s))/3 - stringShardSampleSize/2,
-		len(s) - stringShardSampleSize,
-	}
-	for _, start := range starts {
-		if start < 0 {
-			start = 0
+	for {
+		shard := &c.shards[idx]
+		shard.mu.Lock()
+
+		bucket := shard.entries[hash]
+		if pos := findEntry(bucket, k); pos >= 0 {
+			result := c.handleExisting(op, shard, bucket, pos, v)
+			shard.mu.Unlock()
+
+			return result
 		}
 
-		end := start + stringShardSampleSize
-		if end > len(s) {
-			end = len(s)
-			start = end - stringShardSampleSize
-		}
+		if c.entryCount.Load() < int64(c.maxEntries) {
+			result := c.handleInsert(op, idx, hash, k, v, shard, bucket)
+			shard.mu.Unlock()
 
-		offset += copy(sampled[offset:], s[start:end])
+			return result
+		}
+		shard.mu.Unlock()
+
+		if !c.evictOldestLocked() {
+			panic("fastcache: failed to evict while cache is full")
+		}
+	}
+}
+
+func (c *Cache[K, V]) handleExisting(op op, shard *shard[K, V], bucket []entry[K, V], pos int, v V) result[V] {
+	switch op {
+	case opSet:
+		bucket[pos].Value = v
+
+		return result[V]{}
+	case opGetOrSet:
+		shard.getCalls++
+
+		return result[V]{value: bucket[pos].Value, loaded: true}
+	case opSetIfAbsent:
+		return result[V]{}
+	default:
+		panic("fastcache: unknown operation")
+	}
+}
+
+func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard *shard[K, V], bucket []entry[K, V]) result[V] {
+	if op != opSet {
+		shard.setCalls++
 	}
 
-	return rapidhash.HashMicro(sampled[:offset])
+	shard.entries[hash] = append(bucket, entry[K, V]{Key: k, Value: v})
+	shard.entryCount++
+	c.order = append(c.order, slot[K]{shard: idx, hash: hash, key: k})
+	c.entryCount.Add(1)
+
+	switch op {
+	case opSet:
+		return result[V]{}
+	case opGetOrSet:
+		return result[V]{value: v}
+	case opSetIfAbsent:
+		return result[V]{stored: true}
+	default:
+		panic("fastcache: unknown operation")
+	}
+}
+
+func (c *Cache[K, V]) evictOldestLocked() bool {
+	for c.head < len(c.order) {
+		slot := c.order[c.head]
+		c.head++
+
+		shard := &c.shards[slot.shard]
+		shard.mu.Lock()
+		bucket := shard.entries[slot.hash]
+		if pos := findEntry(bucket, slot.key); pos >= 0 {
+			bucket = deleteEntry(bucket, pos)
+			if len(bucket) == 0 {
+				delete(shard.entries, slot.hash)
+			} else {
+				shard.entries[slot.hash] = bucket
+			}
+			shard.entryCount--
+			shard.evictions++
+			shard.mu.Unlock()
+			c.entryCount.Add(-1)
+			c.compactOrderLocked()
+
+			return true
+		}
+		shard.mu.Unlock()
+	}
+
+	return false
+}
+
+func (c *Cache[K, V]) compactOrderLocked() {
+	if c.head < 1024 && c.head*2 < len(c.order) {
+		return
+	}
+
+	remaining := len(c.order) - c.head
+	copy(c.order, c.order[c.head:])
+	clear(c.order[remaining:])
+	c.order = c.order[:remaining]
+	c.head = 0
 }

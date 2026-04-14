@@ -82,12 +82,6 @@ func (c *Cache[K, V]) SaveTo(w io.Writer) error {
 	return c.save(w, 1)
 }
 
-// entry is used for serializing key-value pairs.
-type entry[K comparable, V any] struct {
-	Key   K
-	Value V
-}
-
 func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 	zw := minlz.NewWriter(w)
 	enc := gob.NewEncoder(zw)
@@ -112,18 +106,14 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 			defer wg.Done()
 			for idx := range shardCh {
 				shard := &c.shards[idx]
-				shard.mu.RLock()
-				entries := make([]entry[K, V], 0, shard.entryLen())
-				if shard.entries != nil {
-					for k, v := range shard.entries {
-						entries = append(entries, entry[K, V]{Key: k, Value: v})
-					}
-				} else {
-					for _, inline := range shard.smallEntries {
-						entries = append(entries, entry[K, V]{Key: inline.key, Value: inline.value})
+				shard.mu.Lock()
+				entries := make([]entry[K, V], 0, shard.entryCount)
+				for _, bucket := range shard.entries {
+					for _, bucketEntry := range bucket {
+						entries = append(entries, entry[K, V]{Key: bucketEntry.Key, Value: bucketEntry.Value})
 					}
 				}
-				shard.mu.RUnlock()
+				shard.mu.Unlock()
 				resultCh <- shardData{idx: idx, entries: entries}
 			}
 		}()

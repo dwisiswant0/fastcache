@@ -11,7 +11,7 @@ import (
 	"go.dw1.io/fastcache"
 )
 
-var sizes = []int{1, 16, 128, 256, 512, 1024, 2048, 4096, 8192}
+var sizes = []int{1, 16, 32, 128, 256, 512, 1024, 2048, 4096, 8192}
 
 // Lazily generated keys and values per size so CI doesn't preallocate everything at once.
 type testData struct {
@@ -64,81 +64,90 @@ func getData(size int) *testData {
 
 func BenchmarkFastcache(b *testing.B) {
 	for _, size := range sizes {
+		maxItems := 12 * size
 		data := getData(size)
 
 		b.Run(fmt.Sprintf("Set/%d", size), func(b *testing.B) {
-			c := original.New(12 * size)
+			c := original.New(maxItems)
 			defer c.Reset()
 
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				idx := i % 12 * size
+				idx := i % maxItems
 				c.Set(data.keys[idx], data.values[idx])
 			}
 		})
 
 		b.Run(fmt.Sprintf("Get/%d", size), func(b *testing.B) {
-			c := original.New(12 * size)
+			c := original.New(maxItems)
 			defer c.Reset()
 
 			// Pre-populate
-			for i := range 12 * size {
+			for i := range maxItems {
 				c.Set(data.keys[i], data.values[i])
 			}
 
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				idx := i % 12 * size
+				idx := i % maxItems
 				c.Get(nil, data.keys[idx])
 			}
 		})
 
 		b.Run(fmt.Sprintf("SetGet/%d", size), func(b *testing.B) {
-			c := original.New(12 * size)
+			c := original.New(maxItems)
 			defer c.Reset()
 
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				idx := i % 12 * size
+				idx := i % maxItems
 				c.Set(data.keys[idx], data.values[idx])
 				c.Get(nil, data.keys[idx])
 			}
 		})
 
 		b.Run(fmt.Sprintf("GetParallel/%d", size), func(b *testing.B) {
-			c := original.New(12 * size)
+			c := original.New(maxItems)
 			defer c.Reset()
 
 			// Pre-populate
-			for i := range 12 * size {
+			for i := range maxItems {
 				c.Set(data.keys[i], data.values[i])
 			}
 
-			var counter atomic.Int64
+			var start atomic.Int64
 			b.ReportAllocs()
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
+				idx := int(start.Add(1)-1) % maxItems
 				for pb.Next() {
-					idx := int(counter.Add(1)) % 12 * size
 					c.Get(nil, data.keys[idx])
+					idx++
+					if idx == maxItems {
+						idx = 0
+					}
 				}
 			})
 		})
 
 		b.Run(fmt.Sprintf("SetParallel/%d", size), func(b *testing.B) {
-			c := original.New(12 * size)
+			c := original.New(maxItems)
 			defer c.Reset()
 
-			var counter atomic.Int64
+			var start atomic.Int64
 			b.ReportAllocs()
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
+				idx := int(start.Add(1)-1) % maxItems
 				for pb.Next() {
-					idx := int(counter.Add(1)) % 12 * size
 					c.Set(data.keys[idx], data.values[idx])
+					idx++
+					if idx == maxItems {
+						idx = 0
+					}
 				}
 			})
 		})
@@ -156,7 +165,7 @@ func BenchmarkFastcacheFork(b *testing.B) {
 
 		// Convert to string keys for the generic cache
 		stringKeys := make([]string, maxItems)
-		for i := range 12 * size {
+		for i := range maxItems {
 			stringKeys[i] = string(data.keys[i])
 		}
 
@@ -167,7 +176,7 @@ func BenchmarkFastcacheFork(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				idx := i % 12 * size
+				idx := i % maxItems
 				c.Set(stringKeys[idx], data.values[idx])
 			}
 		})
@@ -177,14 +186,14 @@ func BenchmarkFastcacheFork(b *testing.B) {
 			defer c.Reset()
 
 			// Pre-populate
-			for i := range 12 * size {
+			for i := range maxItems {
 				c.Set(stringKeys[i], data.values[i])
 			}
 
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				idx := i % 12 * size
+				idx := i % maxItems
 				c.Get(stringKeys[idx])
 			}
 		})
@@ -196,7 +205,7 @@ func BenchmarkFastcacheFork(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				idx := i % 12 * size
+				idx := i % maxItems
 				c.Set(stringKeys[idx], data.values[idx])
 				c.Get(stringKeys[idx])
 			}
@@ -207,17 +216,21 @@ func BenchmarkFastcacheFork(b *testing.B) {
 			defer c.Reset()
 
 			// Pre-populate
-			for i := range 12 * size {
+			for i := range maxItems {
 				c.Set(stringKeys[i], data.values[i])
 			}
 
-			var counter atomic.Int64
+			var start atomic.Int64
 			b.ReportAllocs()
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
+				idx := int(start.Add(1)-1) % maxItems
 				for pb.Next() {
-					idx := int(counter.Add(1)) % 12 * size
 					c.Get(stringKeys[idx])
+					idx++
+					if idx == maxItems {
+						idx = 0
+					}
 				}
 			})
 		})
@@ -226,13 +239,17 @@ func BenchmarkFastcacheFork(b *testing.B) {
 			c := fastcache.New[string, []byte](12 * size)
 			defer c.Reset()
 
-			var counter atomic.Int64
+			var start atomic.Int64
 			b.ReportAllocs()
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
+				idx := int(start.Add(1)-1) % maxItems
 				for pb.Next() {
-					idx := int(counter.Add(1)) % 12 * size
 					c.Set(stringKeys[idx], data.values[idx])
+					idx++
+					if idx == maxItems {
+						idx = 0
+					}
 				}
 			})
 		})
@@ -250,7 +267,7 @@ func BenchmarkOtter(b *testing.B) {
 
 		// Convert to string keys for otter
 		stringKeys := make([]string, maxItems)
-		for i := range 12 * size {
+		for i := range maxItems {
 			stringKeys[i] = string(data.keys[i])
 		}
 
@@ -262,7 +279,7 @@ func BenchmarkOtter(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				idx := i % 12 * size
+				idx := i % maxItems
 				c.Set(stringKeys[idx], data.values[idx])
 			}
 		})
@@ -273,14 +290,14 @@ func BenchmarkOtter(b *testing.B) {
 			})
 
 			// Pre-populate
-			for i := range 12 * size {
+			for i := range maxItems {
 				c.Set(stringKeys[i], data.values[i])
 			}
 
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				idx := i % 12 * size
+				idx := i % maxItems
 				c.GetIfPresent(stringKeys[idx])
 			}
 		})
@@ -293,7 +310,7 @@ func BenchmarkOtter(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				idx := i % 12 * size
+				idx := i % maxItems
 				c.Set(stringKeys[idx], data.values[idx])
 				c.GetIfPresent(stringKeys[idx])
 			}
@@ -305,17 +322,21 @@ func BenchmarkOtter(b *testing.B) {
 			})
 
 			// Pre-populate
-			for i := range 12 * size {
+			for i := range maxItems {
 				c.Set(stringKeys[i], data.values[i])
 			}
 
-			var counter atomic.Int64
+			var start atomic.Int64
 			b.ReportAllocs()
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
+				idx := int(start.Add(1)-1) % maxItems
 				for pb.Next() {
-					idx := int(counter.Add(1)) % 12 * size
 					c.GetIfPresent(stringKeys[idx])
+					idx++
+					if idx == maxItems {
+						idx = 0
+					}
 				}
 			})
 		})
@@ -325,13 +346,17 @@ func BenchmarkOtter(b *testing.B) {
 				MaximumSize: 12 * size,
 			})
 
-			var counter atomic.Int64
+			var start atomic.Int64
 			b.ReportAllocs()
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
+				idx := int(start.Add(1)-1) % maxItems
 				for pb.Next() {
-					idx := int(counter.Add(1)) % 12 * size
 					c.Set(stringKeys[idx], data.values[idx])
+					idx++
+					if idx == maxItems {
+						idx = 0
+					}
 				}
 			})
 		})
