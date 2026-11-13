@@ -10,4 +10,6 @@ var (
 	ErrEvictionFailed = errors.New("fastcache: failed to evict while cache is full")
 
 	errUnknownOp = errors.New("fastcache: unknown operation")
+
+	errUnsupportedType = errors.New("fastcache: unsupported type for persistence")
 )
