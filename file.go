@@ -13,6 +13,9 @@ import (
 	"github.com/minio/minlz"
 )
 
+// syncFile flushes f to stable storage; tests replace it.
+var syncFile = (*os.File).Sync
+
 // SaveToFile atomically saves cache data to the given filePath.
 //
 // The data is serialized using [gob] and compressed with [snappy].
@@ -60,6 +63,12 @@ func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) err
 		_ = tmpFile.Close()
 
 		return fmt.Errorf("cannot save cache data to %q: %s", tmpPath, err)
+	}
+
+	if err := syncFile(tmpFile); err != nil {
+		_ = tmpFile.Close()
+
+		return fmt.Errorf("cannot sync temporary file %q: %w", tmpPath, err)
 	}
 
 	if err := tmpFile.Close(); err != nil {

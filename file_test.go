@@ -54,6 +54,130 @@ func TestSaveLoadSmall(t *testing.T) {
 	}
 }
 
+var errSync = errors.New("sync failed")
+
+// newSyncTestCache returns a cache holding the entry foo=bar.
+func newSyncTestCache(t *testing.T) *Cache[string, string] {
+	t.Helper()
+
+	cache, err := New[string, string](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	t.Cleanup(cache.Reset)
+
+	err = cache.Set("foo", "bar")
+	if err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	return cache
+}
+
+// replaceSyncFile installs hook as syncFile until the test ends.
+func replaceSyncFile(t *testing.T, hook func(*os.File) error) {
+	t.Helper()
+
+	orig := syncFile
+
+	t.Cleanup(func() { syncFile = orig })
+
+	syncFile = hook
+}
+
+func TestSaveToFileSyncsBeforeRename(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "snapshot.fastcache")
+	cache := newSyncTestCache(t)
+
+	var synced []string
+
+	replaceSyncFile(t, func(file *os.File) error {
+		synced = append(synced, file.Name())
+
+		_, err := os.Stat(filePath)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("filePath must not exist before sync; Stat error: %v", err)
+		}
+
+		if got := filepath.Dir(file.Name()); got != dir {
+			t.Errorf("synced file dir = %q; want %q", got, dir)
+		}
+
+		info, err := file.Stat()
+		if err != nil {
+			t.Errorf("Stat error: %s", err)
+
+			return nil
+		}
+
+		if info.Size() == 0 {
+			t.Errorf("synced file must hold the snapshot; got empty file")
+		}
+
+		return nil
+	})
+
+	err := cache.SaveToFile(filePath)
+	if err != nil {
+		t.Fatalf("SaveToFile error: %s", err)
+	}
+
+	if len(synced) != 1 {
+		t.Fatalf("sync calls = %d; want 1", len(synced))
+	}
+
+	loaded, err := LoadFromFile[string, string](filePath)
+	if err != nil {
+		t.Fatalf("LoadFromFile error: %s", err)
+	}
+
+	defer loaded.Reset()
+
+	v, ok := loaded.Get("foo")
+	if !ok || v != "bar" {
+		t.Fatalf("Get(foo) = %q, %v; want bar, true", v, ok)
+	}
+}
+
+func TestSaveToFileSyncError(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "snapshot.fastcache")
+	cache := newSyncTestCache(t)
+
+	// A failed save must leave the previous snapshot in place.
+	old := []byte("previous snapshot")
+
+	err := os.WriteFile(filePath, old, 0o600)
+	if err != nil {
+		t.Fatalf("WriteFile error: %s", err)
+	}
+
+	replaceSyncFile(t, func(*os.File) error { return errSync })
+
+	err = cache.SaveToFile(filePath)
+	if !errors.Is(err, errSync) {
+		t.Fatalf("SaveToFile error = %v; want it to wrap %v", err, errSync)
+	}
+
+	got, err := os.ReadFile(filePath)
+	if err != nil || !bytes.Equal(got, old) {
+		t.Fatalf("filePath = %q, %v; want the previous snapshot %q", got, err, old)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir error: %s", err)
+	}
+
+	for _, e := range entries {
+		if e.Name() != filepath.Base(filePath) {
+			t.Errorf("unexpected leftover file %q", e.Name())
+		}
+	}
+}
+
 func TestLoadFileNotExist(t *testing.T) {
 	c, err := LoadFromFile[string, string](`non-existing-file`)
 	if err == nil {
