@@ -7,10 +7,14 @@
 // # Architecture
 //
 // The cache uses a sharded design with 512 shards, each with its own lock.
-// This reduces contention on multi-core CPUs. Each shard contains:
+// This reduces contention on multi-core CPUs. Each shard stores its entries
+// in a hash map keyed by the rapidhash value of the key, for O(1) lookups.
 //
-//   - A map[K]V for O(1) lookups.
-//   - A ring buffer tracking insertion order for FIFO eviction.
+// A single FIFO queue shared by all shards tracks insertion order, so the
+// capacity limit and eviction order apply to the whole cache. Adding a new key
+// also locks this queue, so new keys are inserted one at a time across the
+// whole cache. Reads, updates of existing keys, and deletes lock only the
+// key's shard.
 //
 // Keys are distributed across shards using rapidhash-based shard hashing.
 //
@@ -46,7 +50,10 @@
 // # Thread Safety
 //
 // All [Cache] methods are safe for concurrent use by multiple goroutines.
-// Iterator methods provide a snapshot view and do not block other operations.
+// Iterator methods copy one shard at a time while holding its lock, then
+// yield entries from the copy. Other operations on a shard wait only during
+// its copy, and the entries yielded do not reflect a single moment for the
+// whole cache.
 //
 // [VictoriaMetrics/fastcache]: https://github.com/VictoriaMetrics/fastcache.
 package fastcache
