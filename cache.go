@@ -67,12 +67,11 @@ func New[K comparable, V any](maxEntries int) (*Cache[K, V], error) {
 	c := &Cache[K, V]{
 		maxEntries: maxEntries,
 		hasher:     newHasher[K](),
-		order:      make([]slot, 0, maxEntries),
 	}
 
-	entriesPerShard := (maxEntries + shardsCount - 1) / shardsCount
+	// maxEntries is only a cap, so storage grows with the stored entries.
 	for i := range c.shards {
-		c.shards[i].entries = make(map[uint64][]entry[K, V], entriesPerShard)
+		c.shards[i].entries = make(map[uint64][]entry[K, V])
 	}
 
 	return c, nil
