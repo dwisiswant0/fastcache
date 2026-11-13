@@ -49,6 +49,10 @@ type result[V any] struct {
 
 const shardMask = uint64(shardsCount - 1)
 
+// minCompactSlots is the fewest reclaimable slots worth a compaction pass
+// over the order log.
+const minCompactSlots = 1024
+
 // New returns a new cache with the given maxEntries capacity.
 //
 // maxEntries is the maximum number of entries the cache can hold.
@@ -226,6 +230,8 @@ func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) (result[V
 	c.orderMu.Lock()
 	defer c.orderMu.Unlock()
 
+	c.dropDeletedLocked()
+
 	for {
 		shard := &c.shards[idx]
 		shard.mu.Lock()
@@ -323,8 +329,43 @@ func (c *Cache[K, V]) evictOldestLocked() bool {
 	return false
 }
 
+// dropDeletedLocked removes the slots of deleted entries from the order log
+// once they outnumber live entries by minCompactSlots. Delete leaves its slot
+// behind, so without this pass Set and Delete churn grows the log without
+// bound, and the next eviction has to skip every dead slot. Each pass removes
+// at least as many slots as it keeps, so its cost stays O(1) per Delete.
+//
+// Callers must not hold any shard lock.
+func (c *Cache[K, V]) dropDeletedLocked() {
+	live := int(c.entryCount.Load())
+	if len(c.order)-c.head-live <= live+minCompactSlots {
+		return
+	}
+
+	kept := 0
+
+	for _, s := range c.order[c.head:] {
+		if c.slotLive(s) {
+			c.order[kept] = s
+			kept++
+		}
+	}
+
+	c.order = c.order[:kept]
+	c.head = 0
+}
+
+func (c *Cache[K, V]) slotLive(s slot) bool {
+	shard := &c.shards[s.shard]
+	shard.mu.Lock()
+	live := findSeq(shard.entries[s.hash], s.seq) >= 0
+	shard.mu.Unlock()
+
+	return live
+}
+
 func (c *Cache[K, V]) compactOrderLocked() {
-	if c.head < 1024 && c.head*2 < len(c.order) {
+	if c.head < minCompactSlots && c.head*2 < len(c.order) {
 		return
 	}
 
