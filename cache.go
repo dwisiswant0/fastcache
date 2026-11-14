@@ -252,6 +252,14 @@ func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) (result[V
 		shard.mu.Unlock()
 
 		if !c.evictOldestLocked() {
+			// A concurrent Delete may have freed room after the fullness
+			// check above but before the eviction pass ran, leaving the
+			// order log with nothing live to evict. Retry the insert
+			// instead of reporting a cache that is no longer full.
+			if c.entryCount.Load() < int64(c.maxEntries) {
+				continue
+			}
+
 			return result[V]{}, fmt.Errorf("%w: entry count=%d, max entries=%d", ErrEvictionFailed, c.entryCount.Load(), c.maxEntries)
 		}
 	}

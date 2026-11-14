@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -972,5 +973,37 @@ func TestCacheSetReturnsErrorWhenEvictionFails(t *testing.T) {
 	}
 	if got := c.Len(); got != 1 {
 		t.Fatalf("unexpected len after eviction failure; got %d; want 1", got)
+	}
+}
+
+func TestCacheSetSucceedsWhenConcurrentDeleteFreesRoom(t *testing.T) {
+	c, err := New[int, int](1)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	var last atomic.Int64
+
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				c.Delete(int(last.Load()))
+			}
+		}
+	}()
+
+	defer close(done)
+
+	for i := 1; i <= 100_000; i++ {
+		if err := c.Set(i, i); err != nil {
+			t.Fatalf("Set(%d) error: %s", i, err)
+		}
+		last.Store(int64(i))
 	}
 }
