@@ -941,6 +941,47 @@ func TestNewAllocatesIndependentlyOfMaxEntries(t *testing.T) {
 	}
 }
 
+// Not parallel: HeapAlloc also counts memory held by other tests.
+func TestCacheResetReleasesMemory(t *testing.T) {
+	const n = 1 << 17
+
+	heapAlloc := func() uint64 {
+		var m runtime.MemStats
+
+		runtime.GC()
+		runtime.ReadMemStats(&m)
+
+		return m.HeapAlloc
+	}
+
+	c, err := New[int, int](n)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	empty := heapAlloc()
+
+	for i := range n {
+		if err := c.Set(i, i); err != nil {
+			t.Fatalf("Set(%d) error: %s", i, err)
+		}
+	}
+
+	used := heapAlloc() - empty
+
+	c.Reset()
+
+	reset := heapAlloc()
+
+	runtime.KeepAlive(c)
+
+	// Keeping only the order log, at 24 bytes per entry, holds about a fifth
+	// of used.
+	if reset > empty+used/10 {
+		t.Fatalf("after Reset the cache holds %d of the %d bytes its %d entries used", reset-empty, used, n)
+	}
+}
+
 func TestNewReturnsErrorForInvalidMaxEntries(t *testing.T) {
 	cache, err := New[string, string](0)
 	if !errors.Is(err, ErrInvalidMaxEntries) {

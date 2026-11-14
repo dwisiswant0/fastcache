@@ -69,10 +69,10 @@ func New[K comparable, V any](maxEntries int) (*Cache[K, V], error) {
 		hasher:     newHasher[K](),
 	}
 
-	// maxEntries is only a cap, so storage grows with the stored entries.
-	for i := range c.shards {
-		c.shards[i].entries = make(map[uint64][]entry[K, V])
-	}
+	// Build the empty state through Reset, so New and Reset share one
+	// definition of it. maxEntries is only a cap, so storage grows with
+	// the stored entries.
+	c.Reset()
 
 	return c, nil
 }
@@ -148,14 +148,15 @@ func (c *Cache[K, V]) GetAndDelete(k K) (v V, loaded bool) {
 	return c.shards[idx].getAndDelete(c, h, k)
 }
 
-// Reset removes all the items from the cache.
+// Reset removes all the items from the cache and releases the memory they
+// used.
 func (c *Cache[K, V]) Reset() {
 	c.orderMu.Lock()
 	for i := range c.shards {
 		c.shards[i].reset()
 	}
-	clear(c.order)
-	c.order = c.order[:0]
+
+	c.order = nil
 	c.head = 0
 	c.entryCount.Store(0)
 	c.orderMu.Unlock()
