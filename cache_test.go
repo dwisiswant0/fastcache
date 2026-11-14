@@ -3,7 +3,9 @@ package fastcache
 import (
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -833,7 +835,7 @@ func testDeleteChurnKeepsOrderLogBounded(t *testing.T, key func(int) string, rem
 	// With no live entries, the log may hold only the dead slots that have
 	// not yet reached the compaction threshold, plus the last one.
 	c.orderMu.Lock()
-	pending := len(c.order) - c.head
+	pending := c.order.len
 	c.orderMu.Unlock()
 
 	if pending > minCompactSlots+1 {
@@ -979,6 +981,112 @@ func TestCacheResetReleasesMemory(t *testing.T) {
 	// of used.
 	if reset > empty+used/10 {
 		t.Fatalf("after Reset the cache holds %d of the %d bytes its %d entries used", reset-empty, used, n)
+	}
+}
+
+// TestCacheEvictionCostIndependentOfMaxEntries checks that evicting from a
+// full cache never does work in proportion to the cache size. Such work,
+// recurring in every window of evictions, takes hundreds of times the mean,
+// while scheduling and GC pauses leave at least one window alone.
+//
+// Not parallel: other tests would add their own pauses to the timings.
+func TestCacheEvictionCostIndependentOfMaxEntries(t *testing.T) {
+	// The Go runtime reads the Windows monotonic clock from the interrupt
+	// time, which advances only on timer ticks of 0.5 ms or more.
+	if runtime.GOOS == "windows" {
+		t.Skip("the monotonic clock is too coarse to time a single Set")
+	}
+
+	const (
+		maxEntries = 1 << 18
+		windows    = 16
+		window     = 1 << 11
+	)
+
+	c, err := New[int, struct{}](maxEntries)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	for i := range maxEntries {
+		if err := c.Set(i, struct{}{}); err != nil {
+			t.Fatalf("Set(%d) error: %s", i, err)
+		}
+	}
+
+	var total time.Duration
+
+	slowest := time.Duration(math.MaxInt64) // the fastest window's slowest Set
+	next := maxEntries
+
+	for range windows {
+		var worst time.Duration
+
+		for range window {
+			start := time.Now()
+			if err := c.Set(next, struct{}{}); err != nil {
+				t.Fatalf("Set(%d) error: %s", next, err)
+			}
+
+			took := time.Since(start)
+			total += took
+			worst = max(worst, took)
+			next++
+		}
+
+		slowest = min(slowest, worst)
+	}
+
+	if mean := total / (windows * window); slowest > 50*mean {
+		t.Fatalf("every window of %d evictions had one taking %v or more; the mean is %v", window, slowest, mean)
+	}
+}
+
+// TestSlotRingKeepsFIFOOrder mixes pushes, pops, and retains so that the ring
+// wraps around before it grows or drops slots. The cache tests rarely get
+// there: the ring wraps only after evictions, and grows after that only when
+// deleted entries pile up.
+func TestSlotRingKeepsFIFOOrder(t *testing.T) {
+	t.Parallel()
+
+	var (
+		ring slotRing
+		want []slot
+		seq  uint64
+	)
+
+	keep := func(s slot) bool { return s.seq%3 != 0 }
+
+	for round := range 300 {
+		for range round%7 + 3 {
+			seq++
+			ring.push(slot{seq: seq})
+			want = append(want, slot{seq: seq})
+		}
+
+		for range min(round%5, len(want)) {
+			if got := ring.pop(); got != want[0] {
+				t.Fatalf("round %d: pop returned seq %d; want %d", round, got.seq, want[0].seq)
+			}
+
+			want = want[1:]
+		}
+
+		if round%11 == 0 {
+			ring.retain(keep)
+
+			want = slices.DeleteFunc(want, func(s slot) bool { return !keep(s) })
+		}
+
+		if ring.len != len(want) {
+			t.Fatalf("round %d: ring holds %d slots; want %d", round, ring.len, len(want))
+		}
+
+		for i, s := range want {
+			if got := ring.buf[ring.index(i)]; got != s {
+				t.Fatalf("round %d: slot %d has seq %d; want %d", round, i, got.seq, s.seq)
+			}
+		}
 	}
 }
 
