@@ -782,6 +782,140 @@ func TestCacheEvictsReAddedKeyInNewInsertionOrder(t *testing.T) {
 	}
 }
 
+func TestCacheDeleteChurnKeepsOrderLogBounded(t *testing.T) {
+	t.Parallel()
+
+	keyFuncs := []struct {
+		name string
+		key  func(i int) string
+	}{
+		{"distinct keys", func(i int) string { return fmt.Sprintf("key-%d", i) }},
+		{"same key", func(int) string { return "k" }},
+	}
+
+	removers := []struct {
+		name   string
+		remove func(c *Cache[string, int], k string)
+	}{
+		{"Delete", func(c *Cache[string, int], k string) { c.Delete(k) }},
+		{"GetAndDelete", func(c *Cache[string, int], k string) { c.GetAndDelete(k) }},
+	}
+
+	for _, kf := range keyFuncs {
+		for _, r := range removers {
+			t.Run(kf.name+"/"+r.name, func(t *testing.T) {
+				t.Parallel()
+
+				testDeleteChurnKeepsOrderLogBounded(t, kf.key, r.remove)
+			})
+		}
+	}
+}
+
+func testDeleteChurnKeepsOrderLogBounded(t *testing.T, key func(int) string, remove func(*Cache[string, int], string)) {
+	t.Helper()
+
+	c, err := New[string, int](1000)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	for i := range 100_000 {
+		k := key(i)
+		if err := c.Set(k, i); err != nil {
+			t.Fatalf("Set(%q) error: %s", k, err)
+		}
+
+		remove(c, k)
+	}
+
+	// With no live entries, the log may hold only the dead slots that have
+	// not yet reached the compaction threshold, plus the last one.
+	c.orderMu.Lock()
+	pending := len(c.order) - c.head
+	c.orderMu.Unlock()
+
+	if pending > minCompactSlots+1 {
+		t.Fatalf("order log holds %d slots for an empty cache; want at most %d", pending, minCompactSlots+1)
+	}
+}
+
+func TestCacheEvictsInInsertionOrderAfterDeleteChurn(t *testing.T) {
+	t.Parallel()
+
+	hashers := []struct {
+		name   string
+		hasher func(string) uint64
+	}{
+		{"rapidhash", nil},
+		{"one bucket", func(string) uint64 { return 1 }},
+	}
+
+	for _, h := range hashers {
+		t.Run(h.name, func(t *testing.T) {
+			t.Parallel()
+
+			testEvictsInInsertionOrderAfterDeleteChurn(t, h.hasher)
+		})
+	}
+}
+
+func testEvictsInInsertionOrderAfterDeleteChurn(t *testing.T, hasher func(string) uint64) {
+	t.Helper()
+
+	const live = 1000
+
+	c, err := New[string, int](2 * live)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	if hasher != nil {
+		c.hasher = hasher
+	}
+
+	setKeys(t, c, "live", live)
+
+	for i := range 10 * minCompactSlots {
+		k := fmt.Sprintf("churn-%d", i)
+		if err := c.Set(k, i); err != nil {
+			t.Fatalf("Set(%q) error: %s", k, err)
+		}
+
+		c.Delete(k)
+	}
+
+	setKeys(t, c, "fill", live)
+
+	for i := range live {
+		over, oldest := fmt.Sprintf("over-%d", i), fmt.Sprintf("live-%d", i)
+		if err := c.Set(over, i); err != nil {
+			t.Fatalf("Set(%q) error: %s", over, err)
+		}
+
+		if c.Has(oldest) {
+			t.Fatalf("Set(%q) did not evict %q", over, oldest)
+		}
+
+		if next := fmt.Sprintf("live-%d", i+1); i+1 < live && !c.Has(next) {
+			t.Fatalf("Set(%q) evicted %q out of insertion order", over, next)
+		}
+	}
+}
+
+func setKeys(t *testing.T, c *Cache[string, int], prefix string, n int) {
+	t.Helper()
+
+	for i := range n {
+		k := fmt.Sprintf("%s-%d", prefix, i)
+		if err := c.Set(k, i); err != nil {
+			t.Fatalf("Set(%q) error: %s", k, err)
+		}
+	}
+}
+
 func TestNewReturnsErrorForInvalidMaxEntries(t *testing.T) {
 	cache, err := New[string, string](0)
 	if !errors.Is(err, ErrInvalidMaxEntries) {
