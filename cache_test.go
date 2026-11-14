@@ -1128,6 +1128,58 @@ func TestCacheSetReturnsErrorWhenEvictionFails(t *testing.T) {
 	}
 }
 
+// TestCacheSetSucceedsWhileDeletesEmptyIt checks that Set does not fail when
+// a Delete removes the entry that Set was about to evict, which leaves the
+// cache with room.
+func TestCacheSetSucceedsWhileDeletesEmptyIt(t *testing.T) {
+	t.Parallel()
+
+	const sets = 100_000
+
+	cache, err := New[int, int](1)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer cache.Reset()
+
+	var (
+		last  atomic.Int64
+		stop  atomic.Bool
+		group sync.WaitGroup
+	)
+
+	group.Go(func() {
+		for !stop.Load() {
+			cache.Delete(int(last.Load()))
+		}
+	})
+
+	var (
+		failed   int
+		firstErr error
+	)
+
+	for key := 1; key <= sets; key++ {
+		err = cache.Set(key, key)
+		if err != nil {
+			if failed == 0 {
+				firstErr = err
+			}
+
+			failed++
+		}
+
+		last.Store(int64(key))
+	}
+
+	stop.Store(true)
+	group.Wait()
+
+	if failed > 0 {
+		t.Fatalf("%d of %d Sets failed; first error: %v", failed, sets, firstErr)
+	}
+}
+
 // TestGetDoesNotWaitForWriters checks that Get takes no lock that writers
 // take. Taking one would make every Get write the lock's cache line, which
 // serializes the Gets of one key across CPUs.
@@ -1469,9 +1521,8 @@ func writeVersions(
 				continue
 			}
 
-			// A concurrent Delete can leave the order log without a live
-			// slot to evict.
-			if err := c.Set(names[i], [2]int{i, ver}); err != nil && !errors.Is(err, ErrEvictionFailed) {
+			err := c.Set(names[i], [2]int{i, ver})
+			if err != nil {
 				t.Errorf("Set(%q) error: %s", names[i], err)
 
 				return

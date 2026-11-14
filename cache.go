@@ -276,7 +276,10 @@ func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) (result[V
 		}
 		shard.mu.Unlock()
 
-		if !c.evictOldestLocked() {
+		// Deletes do not take orderMu, so since the check above they may
+		// have removed every entry left to evict. That leaves room, and the
+		// next pass inserts k.
+		if !c.evictOldestLocked() && c.entryCount.Load() >= int64(c.maxEntries) {
 			return result[V]{}, fmt.Errorf("%w: entry count=%d, max entries=%d", ErrEvictionFailed, c.entryCount.Load(), c.maxEntries)
 		}
 	}
