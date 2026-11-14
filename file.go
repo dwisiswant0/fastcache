@@ -20,7 +20,7 @@ var syncFile = (*os.File).Sync
 
 // SaveToFile atomically saves cache data to the given filePath.
 //
-// The data is serialized using [gob] and compressed with [snappy].
+// The data is serialized using [gob] and compressed with [minlz].
 // SaveToFile may be called concurrently with other ops on the cache.
 //
 // The saved data may be loaded with [LoadFromFile].
@@ -92,7 +92,7 @@ func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) err
 
 // SaveTo saves cache data to the given writer.
 //
-// The data is serialized using [gob] and compressed with [snappy].
+// The data is serialized using [gob] and compressed with [minlz].
 // SaveTo may be called concurrently with other ops on the cache.
 //
 // The saved data may be loaded with [LoadFrom].

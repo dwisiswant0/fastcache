@@ -14,7 +14,7 @@ A fast, generic, thread-safe cache for Go.
 * **Thread-safe**: Concurrent goroutines may read and write into a single cache instance.
 * **FIFO eviction**: Oldest entries are evicted first when the cache is full.
 * **Iterators**: Go 1.23+ range-over-func support with `All()`, `Keys()`, `Values()`.
-* **Atomic operations**: `GetOrSet`, `GetAndDelete`, `SetIfAbsent` for lock-free patterns.
+* **Atomic operations**: `GetOrSet`, `GetAndDelete`, `SetIfAbsent` check and update a key in one step, with no locking in your code.
 * **Persistence**: Cache can be saved to file and loaded from file.
 * **Simple API**: See [Go reference](https://pkg.go.dev/go.dw1.io/fastcache).
 
@@ -125,8 +125,8 @@ func main() {
 The cache uses a sharded design for concurrent scalability:
 
 * **512 shards**: Each with its own lock, reducing contention on multi-core CPUs.
-* **Generic map storage**: `map[K]V` per shard for O(1) lookups.
-* **Ring buffer for FIFO**: Circular buffer tracks insertion order for eviction.
+* **Hash map per shard**: Entries are stored by the rapidhash value of their key, for O(1) lookups.
+* **Cache-wide FIFO queue**: One queue tracks insertion order across all shards, so the oldest entry in the cache is evicted first. Adding a new key also locks this queue.
 
 ## Differences from Original
 
@@ -134,7 +134,7 @@ The cache uses a sharded design for concurrent scalability:
 |--------|-------------------|-----------|
 | **API** | `[]byte` keys/values | Generic `[K, V]` |
 | **Capacity** | Bytes-based | Entry-count based |
-| **Storage** | Ring buffer of bytes | `map[K]V` |
+| **Storage** | Ring buffer of bytes | Hash map per shard |
 | **Eviction** | FIFO (by byte position) | FIFO (by insertion order) |
 | **Allocations** | 1 alloc/Get | Zero |
 
