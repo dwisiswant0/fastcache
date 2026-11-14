@@ -3,6 +3,7 @@ package fastcache
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -18,8 +19,7 @@ type Cache[K comparable, V any] struct {
 	hasher     func(K) uint64
 	maxEntries int
 	orderMu    sync.Mutex
-	order      []slot
-	head       int
+	order      slotRing
 	seq        uint64       // last insertion number, guarded by orderMu
 	entryCount atomic.Int64 // global entry count for accurate capacity enforcement
 }
@@ -156,8 +156,7 @@ func (c *Cache[K, V]) Reset() {
 		c.shards[i].reset()
 	}
 
-	c.order = nil
-	c.head = 0
+	c.order = slotRing{}
 	c.entryCount.Store(0)
 	c.orderMu.Unlock()
 }
@@ -294,16 +293,15 @@ func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard 
 	c.seq++
 	shard.entries[hash] = append(bucket, entry[K, V]{Key: k, Value: v, seq: c.seq})
 	shard.entryCount++
-	c.order = append(c.order, slot{shard: idx, hash: hash, seq: c.seq})
+	c.order.push(slot{shard: idx, hash: hash, seq: c.seq})
 	c.entryCount.Add(1)
 
 	return res, nil
 }
 
 func (c *Cache[K, V]) evictOldestLocked() bool {
-	for c.head < len(c.order) {
-		slot := c.order[c.head]
-		c.head++
+	for c.order.len > 0 {
+		slot := c.order.pop()
 
 		shard := &c.shards[slot.shard]
 		shard.mu.Lock()
@@ -319,7 +317,6 @@ func (c *Cache[K, V]) evictOldestLocked() bool {
 			shard.evictions++
 			shard.mu.Unlock()
 			c.entryCount.Add(-1)
-			c.compactOrderLocked()
 
 			return true
 		}
@@ -338,21 +335,11 @@ func (c *Cache[K, V]) evictOldestLocked() bool {
 // Callers must not hold any shard lock.
 func (c *Cache[K, V]) dropDeletedLocked() {
 	live := int(c.entryCount.Load())
-	if len(c.order)-c.head-live <= live+minCompactSlots {
+	if c.order.len-live <= live+minCompactSlots {
 		return
 	}
 
-	kept := 0
-
-	for _, s := range c.order[c.head:] {
-		if c.slotLive(s) {
-			c.order[kept] = s
-			kept++
-		}
-	}
-
-	c.order = c.order[:kept]
-	c.head = 0
+	c.order.retain(c.slotLive)
 }
 
 func (c *Cache[K, V]) slotLive(s slot) bool {
@@ -364,14 +351,74 @@ func (c *Cache[K, V]) slotLive(s slot) bool {
 	return live
 }
 
-func (c *Cache[K, V]) compactOrderLocked() {
-	if c.head < minCompactSlots && c.head*2 < len(c.order) {
-		return
+// slotRing is the order log: a FIFO queue of slots in a ring buffer. Popping
+// the oldest slot frees its cell in place. A plain slice would have to move
+// every remaining slot to reuse its front, and an eviction would then cost
+// time in proportion to the cache size.
+type slotRing struct {
+	buf  []slot
+	head int // index in buf of the oldest slot
+	len  int // number of slots in the queue
+}
+
+// push adds s as the newest slot.
+func (r *slotRing) push(s slot) {
+	if r.len == len(r.buf) {
+		r.grow()
 	}
 
-	remaining := len(c.order) - c.head
-	copy(c.order, c.order[c.head:])
-	clear(c.order[remaining:])
-	c.order = c.order[:remaining]
-	c.head = 0
+	r.buf[r.index(r.len)] = s
+	r.len++
+}
+
+// pop removes and returns the oldest slot. The ring must not be empty.
+func (r *slotRing) pop() slot {
+	s := r.buf[r.head]
+	r.head = r.index(1)
+	r.len--
+
+	return s
+}
+
+// retain removes the slots for which keep returns false and keeps the others
+// in order.
+func (r *slotRing) retain(keep func(slot) bool) {
+	kept := 0
+
+	for i := range r.len {
+		if s := r.buf[r.index(i)]; keep(s) {
+			r.buf[r.index(kept)] = s
+			kept++
+		}
+	}
+
+	r.len = kept
+}
+
+// index returns the position in buf of the i-th oldest slot.
+func (r *slotRing) index(i int) int {
+	i += r.head
+	if i >= len(r.buf) {
+		i -= len(r.buf)
+	}
+
+	return i
+}
+
+// grow enlarges buf as append would grow a slice, so the ring takes as much
+// memory as a slice of the same slots did. When the queue wraps around, the
+// oldest slots run from head to the end of buf; they move to the end of the
+// new buffer, which leaves the free cells between the newest and the oldest
+// slot.
+func (r *slotRing) grow() {
+	buf := slices.Grow(r.buf, 1)
+	buf = buf[:cap(buf)]
+
+	if r.head > 0 {
+		head := len(buf) - (len(r.buf) - r.head)
+		copy(buf[head:], r.buf[r.head:])
+		r.head = head
+	}
+
+	r.buf = buf
 }
