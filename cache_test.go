@@ -916,6 +916,31 @@ func setKeys(t *testing.T, c *Cache[string, int], prefix string, n int) {
 	}
 }
 
+// Not parallel: TotalAlloc also counts allocations made by other tests.
+func TestNewAllocatesIndependentlyOfMaxEntries(t *testing.T) {
+	allocated := func(maxEntries int) uint64 {
+		var before, after runtime.MemStats
+
+		runtime.ReadMemStats(&before)
+		c, err := New[string, []byte](maxEntries)
+
+		runtime.ReadMemStats(&after)
+
+		if err != nil {
+			t.Fatalf("New(%d) error: %s", maxEntries, err)
+		}
+
+		runtime.KeepAlive(c)
+
+		return after.TotalAlloc - before.TotalAlloc
+	}
+
+	small, large := allocated(1), allocated(1_000_000)
+	if large > 2*small {
+		t.Fatalf("New(1_000_000) allocated %d bytes; New(1) allocated %d", large, small)
+	}
+}
+
 func TestNewReturnsErrorForInvalidMaxEntries(t *testing.T) {
 	cache, err := New[string, string](0)
 	if !errors.Is(err, ErrInvalidMaxEntries) {
