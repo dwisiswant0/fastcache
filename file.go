@@ -119,7 +119,7 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 
 	type shardData struct {
 		idx     int
-		entries []entry[K, V]
+		entries []*entry[K, V]
 	}
 
 	shardCh := make(chan int, shardsCount)
@@ -133,10 +133,7 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 			for idx := range shardCh {
 				shard := &c.shards[idx]
 				shard.mu.Lock()
-				entries := make([]entry[K, V], 0, shard.entryCount)
-				for _, bucket := range shard.entries {
-					entries = append(entries, bucket...)
-				}
+				entries := shard.appendLocked(make([]*entry[K, V], 0, shard.entryCount))
 				shard.mu.Unlock()
 				resultCh <- shardData{idx: idx, entries: entries}
 			}
@@ -152,7 +149,7 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 		close(resultCh)
 	}()
 
-	shardEntries := make([][]entry[K, V], shardsCount)
+	shardEntries := make([][]*entry[K, V], shardsCount)
 	for data := range resultCh {
 		shardEntries[data.idx] = data.entries
 	}
