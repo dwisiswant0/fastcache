@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1008,7 +1009,11 @@ func TestCacheEvictionCostIndependentOfMaxEntries(t *testing.T) {
 		t.Fatalf("New error: %s", err)
 	}
 
-	for i := range maxEntries {
+	// Fill the cache, then replace every entry once before timing. Shards
+	// whose entry counts wander across a growth threshold in the first
+	// turnover grow their tables, each once; that belongs to filling, not to
+	// evicting.
+	for i := range 2 * maxEntries {
 		if err := c.Set(i, struct{}{}); err != nil {
 			t.Fatalf("Set(%d) error: %s", i, err)
 		}
@@ -1017,7 +1022,7 @@ func TestCacheEvictionCostIndependentOfMaxEntries(t *testing.T) {
 	var total time.Duration
 
 	slowest := time.Duration(math.MaxInt64) // the fastest window's slowest Set
-	next := maxEntries
+	next := 2 * maxEntries
 
 	for range windows {
 		var worst time.Duration
@@ -1108,8 +1113,7 @@ func TestCacheSetReturnsErrorWhenEvictionFails(t *testing.T) {
 	defer c.Reset()
 
 	c.hasher = func(string) uint64 { return 1 }
-	c.shards[1].entries[1] = []entry[string, string]{{Key: "stale", Value: "value"}}
-	c.shards[1].entryCount = 1
+	c.shards[1].insertLocked(&entry[string, string]{Key: "stale", Value: "value", hash: 1})
 	c.entryCount.Store(1)
 
 	err = c.Set("fresh", "value")
@@ -1122,4 +1126,380 @@ func TestCacheSetReturnsErrorWhenEvictionFails(t *testing.T) {
 	if got := c.Len(); got != 1 {
 		t.Fatalf("unexpected len after eviction failure; got %d; want 1", got)
 	}
+}
+
+// TestGetDoesNotWaitForWriters checks that Get takes no lock that writers
+// take. Taking one would make every Get write the lock's cache line, which
+// serializes the Gets of one key across CPUs.
+func TestGetDoesNotWaitForWriters(t *testing.T) {
+	t.Parallel()
+
+	c, err := New[string, int](16)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	if err := c.Set("k", 1); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	sh := &c.shards[c.shardIndexFromHash(c.hasher("k"))]
+
+	// A writer that adds a key holds both locks.
+	c.orderMu.Lock()
+	sh.mu.Lock()
+
+	var once sync.Once
+
+	unlock := func() {
+		once.Do(func() {
+			sh.mu.Unlock()
+			c.orderMu.Unlock()
+		})
+	}
+	defer unlock()
+
+	type found struct{ stored, absent bool }
+
+	done := make(chan found, 1)
+
+	go func() {
+		_, stored := c.Get("k")
+		_, absent := c.Get("absent")
+
+		done <- found{stored, absent}
+	}()
+
+	select {
+	case got := <-done:
+		if !got.stored || got.absent {
+			t.Fatalf("Get found a stored key: %v; found an absent key: %v", got.stored, got.absent)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Get waited for a lock held by a writer")
+	}
+
+	unlock()
+
+	var stats Stats
+
+	c.UpdateStats(&stats)
+
+	if stats.GetCalls != 2 || stats.Hits != 1 || stats.Misses != 1 {
+		t.Fatalf("unexpected stats; got %+v; want 2 GetCalls, 1 Hit, 1 Miss", stats)
+	}
+}
+
+// TestGetFindsKeysWhileDeletesMoveThem checks that Get never misses a stored
+// key because a delete moved it. All keys share one hash, so they form one
+// probe run in insertion order. The writer deletes the key at the front of the
+// run and sets it again at the back, which moves every other key back one
+// slot. Each reader gets the key half a run behind the front, which stays
+// stored until keys/2 rotations later.
+func TestGetFindsKeysWhileDeletesMoveThem(t *testing.T) {
+	t.Parallel()
+
+	const keys = 64
+
+	c, err := New[int, int](16 * keys)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	c.hasher = func(int) uint64 { return 7 }
+
+	for k := range keys {
+		if err := c.Set(k, k); err != nil {
+			t.Fatalf("Set(%d) error: %s", k, err)
+		}
+	}
+
+	var (
+		rotations atomic.Int64
+		stop      atomic.Bool
+		group     sync.WaitGroup
+	)
+
+	group.Go(func() {
+		for n := 0; !stop.Load(); n++ {
+			k := n % keys
+
+			c.Delete(k)
+
+			if err := c.Set(k, k); err != nil {
+				t.Errorf("Set(%d) error: %s", k, err)
+
+				return
+			}
+
+			rotations.Add(1)
+		}
+	})
+
+	for range 4 {
+		group.Go(func() {
+			for !stop.Load() {
+				before := rotations.Load()
+				k := int((before + keys/2) % keys)
+
+				if _, ok := c.Get(k); !ok && rotations.Load()-before < keys/2 {
+					t.Errorf("Get(%d) missed a stored key while deletes moved it", k)
+
+					return
+				}
+			}
+		})
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	stop.Store(true)
+	group.Wait()
+}
+
+// TestGetDoesNotAllocate is not parallel: AllocsPerRun counts the mallocs of
+// the whole process.
+func TestGetDoesNotAllocate(t *testing.T) {
+	c, err := New[string, string](16)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	if err := c.Set("k", "v"); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	// A serial cache counts on one stripe; a contended one switches to the
+	// pool of stripe indexes for good. Check both ways of counting.
+	for _, striped := range []bool{false, true} {
+		c.getsStriped.Store(striped)
+
+		// Two collections empty the pool, so the run below would allocate
+		// if Get had to box a stripe index.
+		runtime.GC()
+		runtime.GC()
+
+		allocs := testing.AllocsPerRun(1000, func() {
+			c.Get("k")
+			c.Get("absent")
+		})
+		if allocs != 0 {
+			t.Fatalf("Get allocated %v times per run with striped counters %v; want 0", allocs, striped)
+		}
+	}
+}
+
+func TestStatsCountConcurrentGetsExactly(t *testing.T) {
+	t.Parallel()
+
+	c, err := New[string, int](16)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	if err := c.Set("k", 1); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	const (
+		goroutines = 8
+		gets       = 10000
+	)
+
+	var group sync.WaitGroup
+	for range goroutines {
+		group.Go(func() { getOneInFour(c, gets) })
+	}
+
+	group.Wait()
+
+	// A GetOrSet that loads counts as a hit.
+	if _, loaded, err := c.GetOrSet("k", 2); err != nil || !loaded {
+		t.Fatalf("GetOrSet returned loaded=%v, error=%v; want loaded", loaded, err)
+	}
+
+	var stats Stats
+
+	c.UpdateStats(&stats)
+
+	wantMisses := uint64(goroutines * gets / 4)
+	wantCalls := uint64(goroutines*gets + 1)
+
+	if stats.GetCalls != wantCalls || stats.Misses != wantMisses || stats.Hits != wantCalls-wantMisses {
+		t.Fatalf("unexpected stats; got %+v; want %d GetCalls, %d Misses", stats, wantCalls, wantMisses)
+	}
+}
+
+// TestCacheResetClearsGetStats checks that Reset zeroes every stripe of the Get
+// counts, not only the one that serial Gets count on.
+func TestCacheResetClearsGetStats(t *testing.T) {
+	t.Parallel()
+
+	c, err := New[string, int](16)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	if err := c.Set("k", 1); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	c.Get("k")
+	c.Get("absent")
+	c.gets[len(c.gets)-1].misses.Add(1) // as a contended Get may count
+	c.Reset()
+
+	var stats Stats
+
+	c.UpdateStats(&stats)
+
+	if stats.GetCalls != 0 || stats.Misses != 0 {
+		t.Fatalf("unexpected stats after Reset; got %+v; want no GetCalls or Misses", stats)
+	}
+}
+
+// getOneInFour gets "absent" for every fourth of n calls, and "k" for the rest.
+func getOneInFour(c *Cache[string, int], n int) {
+	for i := range n {
+		if i%4 == 0 {
+			c.Get("absent")
+		} else {
+			c.Get("k")
+		}
+	}
+}
+
+// TestGetConcurrentWithWritersIsConsistent runs Get against updates, deletes,
+// evictions, table growth, and Reset. A Get must return a value stored for
+// its key, and never an older version than the same goroutine saw before.
+func TestGetConcurrentWithWritersIsConsistent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		hasher func(string) uint64
+	}{
+		{"rapidhash", nil},
+		{"one hash", func(string) uint64 { return 7 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			testGetConcurrentWithWriters(t, tc.hasher)
+		})
+	}
+}
+
+func testGetConcurrentWithWriters(t *testing.T, hasher func(string) uint64) {
+	t.Helper()
+
+	const (
+		keys       = 64
+		maxEntries = 48
+		writers    = 4
+		readers    = 8
+	)
+
+	c, err := New[string, [2]int](maxEntries)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	if hasher != nil {
+		c.hasher = hasher
+	}
+
+	names := make([]string, keys)
+	for i := range names {
+		names[i] = fmt.Sprintf("key %d", i)
+	}
+
+	var (
+		stop  atomic.Bool
+		group sync.WaitGroup
+	)
+
+	// Each key has one writer, so its versions only increase.
+	for first := range writers {
+		group.Go(func() { writeVersions(t, c, names, first, writers, &stop) })
+	}
+
+	group.Go(func() {
+		for !stop.Load() {
+			time.Sleep(time.Millisecond)
+			c.Reset()
+		}
+	})
+
+	for range readers {
+		group.Go(func() {
+			seen := make([]int, keys)
+
+			for !stop.Load() {
+				if !readVersions(t, c, names, seen) {
+					return
+				}
+			}
+		})
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	stop.Store(true)
+	group.Wait()
+}
+
+// writeVersions stores a new version of every step-th name from names[first],
+// until stop. It deletes the name instead on every seventh version, so that
+// deletes move other entries.
+func writeVersions(
+	t *testing.T, c *Cache[string, [2]int], names []string, first, step int, stop *atomic.Bool,
+) {
+	t.Helper()
+
+	for ver := 1; !stop.Load(); ver++ {
+		for i := first; i < len(names); i += step {
+			if ver%7 == 3 {
+				c.Delete(names[i])
+
+				continue
+			}
+
+			// A concurrent Delete can leave the order log without a live
+			// slot to evict.
+			if err := c.Set(names[i], [2]int{i, ver}); err != nil && !errors.Is(err, ErrEvictionFailed) {
+				t.Errorf("Set(%q) error: %s", names[i], err)
+
+				return
+			}
+		}
+	}
+}
+
+// readVersions gets every name and records in seen the version it found. It
+// reports an error, and returns false, for a value stored for another key or
+// older than the one in seen.
+func readVersions(t *testing.T, c *Cache[string, [2]int], names []string, seen []int) bool {
+	t.Helper()
+
+	for i, name := range names {
+		got, ok := c.Get(name)
+		if !ok {
+			continue
+		}
+
+		if got[0] != i || got[1] < seen[i] {
+			t.Errorf("Get(%q) = %v after seeing version %d", name, got, seen[i])
+
+			return false
+		}
+
+		seen[i] = got[1]
+	}
+
+	return true
 }

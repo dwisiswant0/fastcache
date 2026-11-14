@@ -2,6 +2,7 @@ package fastcache
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -115,6 +116,47 @@ func BenchmarkCacheGetConcurrent(b *testing.B) {
 			k := fmt.Sprintf("key %d", i)
 			c.Get(k)
 		}
+	})
+}
+
+// BenchmarkCacheGetParallel checks that Get scales with CPUs: reading one key
+// from all of them must cost about as much as reading many keys.
+func BenchmarkCacheGetParallel(b *testing.B) {
+	c, err := New[string, int](4096)
+	if err != nil {
+		b.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	keys := make([]string, 1024)
+	for i := range keys {
+		keys[i] = "key" + strconv.Itoa(i)
+		if err := c.Set(keys[i], i); err != nil {
+			b.Fatalf("Set error: %s", err)
+		}
+	}
+
+	b.Run("one-key", func(b *testing.B) {
+		b.ReportAllocs()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				c.Get(keys[0])
+			}
+		})
+	})
+
+	b.Run("many-keys", func(b *testing.B) {
+		var next atomic.Int64
+
+		b.ReportAllocs()
+		b.RunParallel(func(pb *testing.PB) {
+			i := int(next.Add(97))
+			for pb.Next() {
+				c.Get(keys[i%len(keys)])
+
+				i++
+			}
+		})
 	})
 }
 

@@ -22,6 +22,14 @@ type Cache[K comparable, V any] struct {
 	order      slotRing
 	seq        uint64       // last insertion number, guarded by orderMu
 	entryCount atomic.Int64 // global entry count for accurate capacity enforcement
+
+	// Every Get reads gets and getsStriped. The padding keeps them off the
+	// cache lines that writers dirty: the fields above, and whatever the
+	// allocator places after a Cache.
+	_           [128]byte
+	gets        []getCounter // Get hits and misses, striped across CPUs
+	getsStriped atomic.Bool  // set by the first Gets to contend on gets[0]
+	_           [128]byte
 }
 
 // slot records one insertion in FIFO order. Delete leaves slots in place, so
@@ -67,6 +75,7 @@ func New[K comparable, V any](maxEntries int) (*Cache[K, V], error) {
 	c := &Cache[K, V]{
 		maxEntries: maxEntries,
 		hasher:     newHasher[K](),
+		gets:       newGetCounters(),
 	}
 
 	// Build the empty state through Reset, so New and Reset share one
@@ -96,7 +105,17 @@ func (c *Cache[K, V]) Get(k K) (V, bool) {
 	h := c.hasher(k)
 	idx := c.shardIndexFromHash(h)
 
-	return c.shards[idx].get(h, k)
+	if e := c.shards[idx].lookup(h, k); e != nil {
+		c.countGet(true)
+
+		return e.Value, true
+	}
+
+	c.countGet(false)
+
+	var zero V
+
+	return zero, false
 }
 
 // Has returns true if entry for the given key exists in the cache.
@@ -158,6 +177,13 @@ func (c *Cache[K, V]) Reset() {
 
 	c.order = slotRing{}
 	c.entryCount.Store(0)
+
+	// Get adds to gets without a lock, so Reset zeroes the cells in place
+	// instead of replacing the slice.
+	for i := range c.gets {
+		c.gets[i].hits.Store(0)
+		c.gets[i].misses.Store(0)
+	}
 	c.orderMu.Unlock()
 }
 
@@ -235,16 +261,15 @@ func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) (result[V
 		shard := &c.shards[idx]
 		shard.mu.Lock()
 
-		bucket := shard.entries[hash]
-		if pos := findEntry(bucket, k); pos >= 0 {
-			result, err := c.handleExisting(op, shard, bucket, pos, v)
+		if t, pos, e := shard.findLocked(hash, k); pos >= 0 {
+			result, err := c.handleExisting(op, shard, t, pos, e, v)
 			shard.mu.Unlock()
 
 			return result, err
 		}
 
 		if c.entryCount.Load() < int64(c.maxEntries) {
-			result, err := c.handleInsert(op, idx, hash, k, v, shard, bucket)
+			result, err := c.handleInsert(op, idx, hash, k, v, shard)
 			shard.mu.Unlock()
 
 			return result, err
@@ -257,16 +282,18 @@ func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) (result[V
 	}
 }
 
-func (c *Cache[K, V]) handleExisting(op op, shard *shard[K, V], bucket []entry[K, V], pos int, v V) (result[V], error) {
+func (c *Cache[K, V]) handleExisting(
+	op op, shard *shard[K, V], t *table[K, V], pos int, e *entry[K, V], v V,
+) (result[V], error) {
 	switch op {
 	case opSet:
-		bucket[pos].Value = v
+		shard.replaceLocked(t, pos, e, v)
 
 		return result[V]{}, nil
 	case opGetOrSet:
-		shard.getCalls++
+		c.countGet(true)
 
-		return result[V]{value: bucket[pos].Value, loaded: true}, nil
+		return result[V]{value: e.Value, loaded: true}, nil
 	case opSetIfAbsent:
 		return result[V]{}, nil
 	default:
@@ -274,7 +301,7 @@ func (c *Cache[K, V]) handleExisting(op op, shard *shard[K, V], bucket []entry[K
 	}
 }
 
-func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard *shard[K, V], bucket []entry[K, V]) (result[V], error) {
+func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard *shard[K, V]) (result[V], error) {
 	var res result[V]
 
 	switch op {
@@ -291,8 +318,7 @@ func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard 
 	}
 
 	c.seq++
-	shard.entries[hash] = append(bucket, entry[K, V]{Key: k, Value: v, seq: c.seq})
-	shard.entryCount++
+	shard.insertLocked(&entry[K, V]{Key: k, Value: v, seq: c.seq, hash: hash})
 	c.order.push(slot{shard: idx, hash: hash, seq: c.seq})
 	c.entryCount.Add(1)
 
@@ -305,15 +331,8 @@ func (c *Cache[K, V]) evictOldestLocked() bool {
 
 		shard := &c.shards[slot.shard]
 		shard.mu.Lock()
-		bucket := shard.entries[slot.hash]
-		if pos := findSeq(bucket, slot.seq); pos >= 0 {
-			bucket = deleteEntry(bucket, pos)
-			if len(bucket) == 0 {
-				delete(shard.entries, slot.hash)
-			} else {
-				shard.entries[slot.hash] = bucket
-			}
-			shard.entryCount--
+		if t, pos := shard.findSeqLocked(slot.hash, slot.seq); pos >= 0 {
+			shard.removeLocked(t, pos)
 			shard.evictions++
 			shard.mu.Unlock()
 			c.entryCount.Add(-1)
@@ -345,7 +364,8 @@ func (c *Cache[K, V]) dropDeletedLocked() {
 func (c *Cache[K, V]) slotLive(s slot) bool {
 	shard := &c.shards[s.shard]
 	shard.mu.Lock()
-	live := findSeq(shard.entries[s.hash], s.seq) >= 0
+	_, pos := shard.findSeqLocked(s.hash, s.seq)
+	live := pos >= 0
 	shard.mu.Unlock()
 
 	return live

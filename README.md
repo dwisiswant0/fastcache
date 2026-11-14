@@ -124,8 +124,9 @@ func main() {
 
 The cache uses a sharded design for concurrent scalability:
 
-* **512 shards**: Each with its own lock, reducing contention on multi-core CPUs.
-* **Hash map per shard**: Entries are stored by the rapidhash value of their key, for O(1) lookups.
+* **512 shards**: Writers lock only the shard of their key, reducing contention on multi-core CPUs.
+* **Open-addressing hash table per shard**: Entries are stored by the rapidhash value of their key, for O(1) lookups.
+* **`Get` without locking**: Readers probe the table with atomic loads, so reading one key scales with the number of CPUs. A miss that overlaps a delete in the same shard probes again under the shard's lock. Hit and miss counts are striped per CPU.
 * **Cache-wide FIFO queue**: One queue tracks insertion order across all shards, so the oldest entry in the cache is evicted first. Adding a new key also locks this queue.
 
 ## Differences from Original
@@ -134,7 +135,7 @@ The cache uses a sharded design for concurrent scalability:
 |--------|-------------------|-----------|
 | **API** | `[]byte` keys/values | Generic `[K, V]` |
 | **Capacity** | Bytes-based | Entry-count based |
-| **Storage** | Ring buffer of bytes | Hash map per shard |
+| **Storage** | Ring buffer of bytes | Open-addressing hash table per shard |
 | **Eviction** | FIFO (by byte position) | FIFO (by insertion order) |
 | **Allocations** | 1 alloc/Get | Zero |
 
