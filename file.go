@@ -124,7 +124,6 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 
 	shardCh := make(chan int, shardsCount)
 	resultCh := make(chan shardData, shardsCount)
-	errCh := make(chan error, concurrency)
 
 	var wg sync.WaitGroup
 	for range concurrency {
@@ -156,12 +155,6 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 	shardEntries := make([][]entry[K, V], shardsCount)
 	for data := range resultCh {
 		shardEntries[data.idx] = data.entries
-	}
-
-	select {
-	case err := <-errCh:
-		return err
-	default:
 	}
 
 	totalEntries := 0
