@@ -21,15 +21,28 @@ type shard[K comparable, V any] struct {
 	entryCount int
 }
 
-// entry is used for serializing key-value pairs.
+// entry is a stored key-value pair. Key and Value are exported for gob
+// serialization; seq is the insertion number shared with the entry's slot and
+// is not serialized.
 type entry[K comparable, V any] struct {
 	Key   K
 	Value V
+	seq   uint64
 }
 
 func findEntry[K comparable, V any](bucket []entry[K, V], key K) int {
 	for i := range bucket {
 		if bucket[i].Key == key {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func findSeq[K comparable, V any](bucket []entry[K, V], seq uint64) int {
+	for i := range bucket {
+		if bucket[i].seq == seq {
 			return i
 		}
 	}

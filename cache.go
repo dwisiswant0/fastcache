@@ -18,15 +18,19 @@ type Cache[K comparable, V any] struct {
 	hasher     func(K) uint64
 	maxEntries int
 	orderMu    sync.Mutex
-	order      []slot[K]
+	order      []slot
 	head       int
+	seq        uint64       // last insertion number, guarded by orderMu
 	entryCount atomic.Int64 // global entry count for accurate capacity enforcement
 }
 
-type slot[K comparable] struct {
+// slot records one insertion in FIFO order. Delete leaves slots in place, so
+// a slot matches its entry by seq, not by key: a key that is deleted and set
+// again must not be evicted through the slot of its first insertion.
+type slot struct {
 	shard int
 	hash  uint64
-	key   K
+	seq   uint64
 }
 
 type op uint8
@@ -59,7 +63,7 @@ func New[K comparable, V any](maxEntries int) (*Cache[K, V], error) {
 	c := &Cache[K, V]{
 		maxEntries: maxEntries,
 		hasher:     newHasher[K](),
-		order:      make([]slot[K], 0, maxEntries),
+		order:      make([]slot, 0, maxEntries),
 	}
 
 	entriesPerShard := (maxEntries + shardsCount - 1) / shardsCount
@@ -281,9 +285,10 @@ func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard 
 		return result[V]{}, fmt.Errorf("%w: %d", errUnknownOp, op)
 	}
 
-	shard.entries[hash] = append(bucket, entry[K, V]{Key: k, Value: v})
+	c.seq++
+	shard.entries[hash] = append(bucket, entry[K, V]{Key: k, Value: v, seq: c.seq})
 	shard.entryCount++
-	c.order = append(c.order, slot[K]{shard: idx, hash: hash, key: k})
+	c.order = append(c.order, slot{shard: idx, hash: hash, seq: c.seq})
 	c.entryCount.Add(1)
 
 	return res, nil
@@ -297,7 +302,7 @@ func (c *Cache[K, V]) evictOldestLocked() bool {
 		shard := &c.shards[slot.shard]
 		shard.mu.Lock()
 		bucket := shard.entries[slot.hash]
-		if pos := findEntry(bucket, slot.key); pos >= 0 {
+		if pos := findSeq(bucket, slot.seq); pos >= 0 {
 			bucket = deleteEntry(bucket, pos)
 			if len(bucket) == 0 {
 				delete(shard.entries, slot.hash)

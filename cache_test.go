@@ -726,6 +726,62 @@ func TestCacheEnforcesGlobalCapacityAcrossShards(t *testing.T) {
 	}
 }
 
+func TestCacheEvictsReAddedKeyInNewInsertionOrder(t *testing.T) {
+	t.Parallel()
+
+	removers := []struct {
+		name   string
+		remove func(c *Cache[string, int], k string)
+	}{
+		{"Delete", func(c *Cache[string, int], k string) { c.Delete(k) }},
+		{"GetAndDelete", func(c *Cache[string, int], k string) { c.GetAndDelete(k) }},
+	}
+
+	for _, r := range removers {
+		t.Run(r.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, err := New[string, int](3)
+			if err != nil {
+				t.Fatalf("New error: %s", err)
+			}
+			defer c.Reset()
+
+			for i, k := range []string{"a", "b", "c"} {
+				if err := c.Set(k, i); err != nil {
+					t.Fatalf("Set(%q) error: %s", k, err)
+				}
+			}
+
+			r.remove(c, "a")
+
+			if err := c.Set("a", 3); err != nil {
+				t.Fatalf("Set(%q) error: %s", "a", err)
+			}
+
+			// Insertion order is now b, c, a, so each new key evicts them in
+			// that order.
+			for _, step := range []struct{ set, evicted string }{
+				{"d", "b"},
+				{"e", "c"},
+				{"f", "a"},
+			} {
+				if err := c.Set(step.set, 0); err != nil {
+					t.Fatalf("Set(%q) error: %s", step.set, err)
+				}
+
+				if c.Has(step.evicted) {
+					t.Fatalf("Set(%q) did not evict %q", step.set, step.evicted)
+				}
+
+				if c.Len() != 3 {
+					t.Fatalf("unexpected len after Set(%q); got %d; want 3", step.set, c.Len())
+				}
+			}
+		})
+	}
+}
+
 func TestNewReturnsErrorForInvalidMaxEntries(t *testing.T) {
 	cache, err := New[string, string](0)
 	if !errors.Is(err, ErrInvalidMaxEntries) {
