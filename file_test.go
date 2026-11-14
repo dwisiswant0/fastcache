@@ -277,6 +277,51 @@ func TestSaveToLoadFrom(t *testing.T) {
 	}
 }
 
+func TestSaveToLoadFromKeepsEvictionOrder(t *testing.T) {
+	t.Parallel()
+
+	const n = 1000
+
+	c, err := New[string, int](n)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	for i := range n {
+		if err := c.Set(fmt.Sprintf("k%d", i), i); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
+	}
+
+	// Re-adding k0 makes it the newest entry, so it must be evicted last.
+	c.Delete("k0")
+
+	if err := c.Set("k0", 0); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	var buf bytes.Buffer
+	if err := c.SaveTo(&buf); err != nil {
+		t.Fatalf("SaveTo error: %s", err)
+	}
+
+	loaded, err := LoadFrom[string, int](&buf)
+	if err != nil {
+		t.Fatalf("LoadFrom error: %s", err)
+	}
+
+	// Eviction order is k1, k2, ..., k999, then k0.
+	for i := range n {
+		if err := loaded.Set(fmt.Sprintf("new%d", i), i); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
+
+		if oldest := fmt.Sprintf("k%d", (i+1)%n); loaded.Has(oldest) {
+			t.Fatalf("Set %d on the loaded cache did not evict %q", i, oldest)
+		}
+	}
+}
+
 func TestSaveToLoadFrom_Struct(t *testing.T) {
 	type User struct {
 		ID   int

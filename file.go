@@ -1,6 +1,7 @@
 package fastcache
 
 import (
+	"cmp"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 
 	"github.com/minio/minlz"
@@ -110,9 +112,7 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 				shard.mu.Lock()
 				entries := make([]entry[K, V], 0, shard.entryCount)
 				for _, bucket := range shard.entries {
-					for _, bucketEntry := range bucket {
-						entries = append(entries, entry[K, V]{Key: bucketEntry.Key, Value: bucketEntry.Value})
-					}
+					entries = append(entries, bucket...)
 				}
 				shard.mu.Unlock()
 				resultCh <- shardData{idx: idx, entries: entries}
@@ -149,11 +149,27 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 		return fmt.Errorf("cannot encode entry count: %s", err)
 	}
 
-	for _, entries := range shardEntries {
-		for _, e := range entries {
-			if err := enc.Encode(e); err != nil {
-				return fmt.Errorf("cannot encode entry: %s", err)
-			}
+	// load re-inserts entries in file order, so write them oldest first to
+	// keep the FIFO eviction order. Sorting small references instead of the
+	// entries keeps the cost independent of the size of V.
+	type entryRef struct {
+		seq        uint64
+		shard, pos int
+	}
+
+	refs := make([]entryRef, 0, totalEntries)
+
+	for shard, entries := range shardEntries {
+		for pos, e := range entries {
+			refs = append(refs, entryRef{seq: e.seq, shard: shard, pos: pos})
+		}
+	}
+
+	slices.SortFunc(refs, func(a, b entryRef) int { return cmp.Compare(a.seq, b.seq) })
+
+	for _, r := range refs {
+		if err := enc.Encode(shardEntries[r.shard][r.pos]); err != nil {
+			return fmt.Errorf("cannot encode entry: %s", err)
 		}
 	}
 
