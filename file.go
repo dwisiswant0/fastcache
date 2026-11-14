@@ -21,6 +21,9 @@ import (
 // SaveToFile may be called concurrently with other ops on the cache.
 //
 // The saved data may be loaded with [LoadFromFile].
+//
+// SaveToFile returns an error if K or V has a field that gob would not
+// encode, such as an unexported struct field.
 func (c *Cache[K, V]) SaveToFile(filePath string) error {
 	return c.SaveToFileConcurrent(filePath, 1)
 }
@@ -31,6 +34,9 @@ func (c *Cache[K, V]) SaveToFile(filePath string) error {
 // SaveToFileConcurrent may be called concurrently with other ops on the cache.
 //
 // The saved data may be loaded with [LoadFromFile].
+//
+// SaveToFileConcurrent returns an error if K or V has a field that gob would
+// not encode, such as an unexported struct field.
 func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) error {
 	dir := filepath.Dir(filePath)
 	if _, err := os.Stat(dir); err != nil {
@@ -81,11 +87,20 @@ func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) err
 // SaveTo may be called concurrently with other ops on the cache.
 //
 // The saved data may be loaded with [LoadFrom].
+//
+// SaveTo returns an error if K or V has a field that gob would not encode,
+// such as an unexported struct field.
 func (c *Cache[K, V]) SaveTo(w io.Writer) error {
 	return c.save(w, 1)
 }
 
 func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
+	// gob silently drops fields it does not send, so reject such types
+	// before writing anything instead of saving data that loads back wrong.
+	if err := checkGobTypes[K, V](); err != nil {
+		return err
+	}
+
 	zw := minlz.NewWriter(w)
 	enc := gob.NewEncoder(zw)
 
