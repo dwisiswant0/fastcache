@@ -1,12 +1,14 @@
 package fastcache
 
 import (
+	"encoding/binary"
 	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 
 	"github.com/minio/minlz"
@@ -219,7 +221,8 @@ func LoadFromFileOrNew[K comparable, V any](filePath string, maxEntries int) (*C
 	return c, nil
 }
 
-// LoadFrom loads cache data from the given reader.
+// LoadFrom loads cache data from the given reader. When it succeeds, it has
+// read r to the end of the saved data and no further.
 //
 // Returns an error if the data is corrupted.
 //
@@ -248,7 +251,8 @@ func load[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
 
 // LoadFromFunc calls load with the key and value of each entry saved in r,
 // oldest first, and stops at the first error load returns. It returns that
-// error, or an error if the data is corrupted.
+// error, or an error if the data is corrupted. When it returns nil, it has
+// read r to the end of the saved data and no further.
 //
 // LoadFromFunc reads the data that [Cache.SaveTo], [Cache.SaveToFile] and
 // [SaveToFunc] write, and S must be a type that gob can decode the saved
@@ -279,7 +283,8 @@ func unexpectedEOF(err error) error {
 // newDecoder returns a decoder for the data that encode wrote to r, and the
 // capacity of the saved cache, which the data starts with.
 func newDecoder(r io.Reader) (*gob.Decoder, int, error) {
-	dec := gob.NewDecoder(minlz.NewReader(r))
+	stream := &streamReader{r: r, header: [chunkHeaderLen]byte{}, read: 0, left: 0, eof: false}
+	dec := gob.NewDecoder(minlz.NewReader(stream))
 
 	var maxEntries int
 	if err := dec.Decode(&maxEntries); err != nil {
@@ -290,8 +295,8 @@ func newDecoder(r io.Reader) (*gob.Decoder, int, error) {
 }
 
 // decodeEntries decodes the entries that follow the capacity and calls load
-// for each, in the order they were written. It returns the first error that
-// load returns.
+// for each, in the order they were written, then reads to the end of the
+// data. It returns the first error that load returns.
 func decodeEntries[K comparable, S any](dec *gob.Decoder, load func(K, S) error) error {
 	var count int
 	if err := dec.Decode(&count); err != nil {
@@ -309,5 +314,74 @@ func decodeEntries[K comparable, S any](dec *gob.Decoder, load func(K, S) error)
 		}
 	}
 
+	// The minlz stream ends with an EOF chunk after the last entry. Reading
+	// it checks the length of the stream, and a SaveTo into a pipe returns
+	// only once the chunk has been read. The zero Value discards whatever
+	// gob decodes. streamReader returns a plain io.EOF after the chunk, so a
+	// wrapped io.EOF means that r ended before it.
+	switch err := dec.DecodeValue(reflect.Value{}); {
+	case err == nil:
+		return errTrailingData
+	case err != io.EOF: //nolint:errorlint // See above.
+		return fmt.Errorf("cannot read the end of the data: %w", err)
+	}
+
 	return nil
+}
+
+// A minlz stream is a sequence of chunks, each a type byte, a 3-byte
+// little-endian body length and the body. See "STREAM FORMAT" in minlz's
+// SPEC.md.
+const (
+	chunkHeaderLen = 4
+	chunkTypeEOF   = 0x20
+)
+
+// streamReader passes one minlz stream through from r and returns io.EOF
+// after the stream's EOF chunk. minlz.Reader reads on after that chunk, for
+// a stream that may follow it, so from a pipe or a connection it would wait
+// for data that SaveTo never writes.
+type streamReader struct {
+	r      io.Reader
+	header [chunkHeaderLen]byte
+	read   int  // bytes of the current chunk's header read so far
+	left   int  // bytes of the current chunk's body not read yet
+	eof    bool // the current chunk is the EOF chunk
+}
+
+// Read returns the errors of r unwrapped, since minlz.Reader compares them
+// with io.EOF.
+//
+//nolint:wrapcheck // See above.
+func (s *streamReader) Read(buf []byte) (int, error) {
+	if s.read == len(s.header) && s.left == 0 {
+		if s.eof {
+			return 0, io.EOF
+		}
+
+		s.read = 0
+	}
+
+	if s.read < len(s.header) {
+		// Stop at the end of the header, so the body's length is known
+		// before any of the body is read.
+		count, err := s.r.Read(buf[:min(len(buf), len(s.header)-s.read)])
+		s.read += copy(s.header[s.read:], buf[:count])
+
+		if s.read == len(s.header) {
+			// The length is the 3 bytes after the type, little-endian.
+			var length [4]byte
+
+			copy(length[:], s.header[1:])
+			s.left = int(binary.LittleEndian.Uint32(length[:]))
+			s.eof = s.header[0] == chunkTypeEOF
+		}
+
+		return count, err
+	}
+
+	count, err := s.r.Read(buf[:min(len(buf), s.left)])
+	s.left -= count
+
+	return count, err
 }

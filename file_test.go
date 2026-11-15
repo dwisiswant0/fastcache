@@ -567,6 +567,145 @@ func TestSaveToLoadFrom(t *testing.T) {
 	}
 }
 
+func TestSaveToPipeReturnsAfterLoad(t *testing.T) {
+	t.Parallel()
+
+	loads := map[string]func(io.Reader) error{
+		"LoadFrom": func(r io.Reader) error {
+			_, err := LoadFrom[string, int](r)
+
+			return err
+		},
+		"LoadFromFunc": func(r io.Reader) error {
+			return LoadFromFunc(r, func(string, int) error { return nil })
+		},
+	}
+
+	for name, load := range loads {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			cache, err := New[string, int](10)
+			if err != nil {
+				t.Fatalf("New error: %s", err)
+			}
+
+			setKeys(t, cache, "k", 5)
+
+			// Nothing closes the writer after SaveTo, as with a connection
+			// that stays open, so the load must stop at the end of the
+			// saved data.
+			reader, writer := io.Pipe()
+
+			t.Cleanup(func() {
+				_ = reader.Close()
+				_ = writer.Close()
+			})
+
+			saved := make(chan error, 1)
+			go func() { saved <- cache.SaveTo(writer) }()
+
+			loaded := make(chan error, 1)
+			go func() { loaded <- load(reader) }()
+
+			timeout := time.After(5 * time.Second)
+			wait := func(funcName string, done <-chan error) {
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatalf("%s error: %s", funcName, err)
+					}
+				case <-timeout:
+					t.Fatalf("%s did not return within 5s", funcName)
+				}
+			}
+
+			wait(name, loaded)
+			wait("SaveTo", saved)
+		})
+	}
+}
+
+func TestLoadFromRejectsDataAfterLastEntry(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+
+	writer := minlz.NewWriter(&buf)
+	enc := gob.NewEncoder(writer)
+
+	// The entry count says one entry, but two follow.
+	values := []any{
+		100, // capacity
+		1,   // entry count
+		&entry[string, int]{Key: "a", Value: 1, seq: 0, hash: 0},
+		&entry[string, int]{Key: "b", Value: 2, seq: 0, hash: 0},
+	}
+	for _, v := range values {
+		err := enc.Encode(v)
+		if err != nil {
+			t.Fatalf("Encode error: %s", err)
+		}
+	}
+
+	err := writer.Close()
+	if err != nil {
+		t.Fatalf("Close error: %s", err)
+	}
+
+	_, err = LoadFrom[string, int](&buf)
+	if !errors.Is(err, errTrailingData) {
+		t.Fatalf("LoadFrom error %v; want %v", err, errTrailingData)
+	}
+}
+
+// eofWrapper wraps the errors of r, io.EOF included, as a reader that breaks
+// the io.Reader contract does.
+type eofWrapper struct{ r io.Reader }
+
+func (w eofWrapper) Read(p []byte) (int, error) {
+	n, err := w.r.Read(p)
+	if err != nil {
+		return n, fmt.Errorf("read: %w", err)
+	}
+
+	return n, nil
+}
+
+func TestLoadFromRejectsDataWithoutEOFChunk(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+
+	// Flush writes the entry but not the EOF chunk that Close adds.
+	writer := minlz.NewWriter(&buf, minlz.WriterConcurrency(1))
+	enc := gob.NewEncoder(writer)
+
+	for _, v := range []any{100, 1, &entry[string, int]{Key: "a", Value: 1, seq: 0, hash: 0}} {
+		err := enc.Encode(v)
+		if err != nil {
+			t.Fatalf("Encode error: %s", err)
+		}
+	}
+
+	err := writer.Flush()
+	if err != nil {
+		t.Fatalf("Flush error: %s", err)
+	}
+
+	readers := map[string]io.Reader{
+		"plain reader":             bytes.NewReader(buf.Bytes()),
+		"reader that wraps io.EOF": eofWrapper{bytes.NewReader(buf.Bytes())},
+	}
+
+	for name, r := range readers {
+		_, err = LoadFrom[string, int](r)
+		if err == nil {
+			t.Errorf("LoadFrom from a %s returned no error", name)
+		}
+	}
+}
+
 func TestSaveToLoadFromKeepsEvictionOrder(t *testing.T) {
 	t.Parallel()
 
