@@ -2,7 +2,6 @@ package fastcache
 
 import (
 	"encoding/gob"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -184,23 +183,33 @@ func LoadFromFile[K comparable, V any](filePath string) (*Cache[K, V], error) {
 	return load[K, V](f)
 }
 
-// LoadFromFileOrNew tries loading cache data from the given filePath.
+// LoadFromFileOrNew returns a new cache with the given maxEntries capacity,
+// filled with the entries saved in filePath, oldest first. It ignores the
+// capacity of the saved cache: when the file holds more than maxEntries
+// entries, the cache keeps the newest, and its stats count the others as
+// evictions.
 //
-// The function falls back to creating a new cache with the given maxEntries
-// capacity if an error occurs during loading. It returns an error only if the
-// fallback cache cannot be created.
+// If the file does not exist or cannot be loaded, the cache is returned empty.
+// LoadFromFileOrNew returns an error only if maxEntries is not positive.
 func LoadFromFileOrNew[K comparable, V any](filePath string, maxEntries int) (*Cache[K, V], error) {
-	c, err := LoadFromFile[K, V](filePath)
-	if err == nil {
-		return c, nil
+	c, err := New[K, V](maxEntries)
+	if err != nil {
+		return nil, err
 	}
 
-	fallback, newErr := New[K, V](maxEntries)
-	if newErr != nil {
-		return nil, errors.Join(err, fmt.Errorf("cannot create fallback cache: %w", newErr))
+	if f, err := os.Open(filePath); err == nil {
+		defer func() {
+			_ = f.Close()
+		}()
+
+		// Drop the entries loaded before the error, so a corrupted file
+		// gives the same empty cache as a missing one.
+		if err := LoadFromFunc(f, c.Set); err != nil {
+			c.Reset()
+		}
 	}
 
-	return fallback, nil
+	return c, nil
 }
 
 // LoadFrom loads cache data from the given reader.

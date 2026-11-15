@@ -371,6 +371,103 @@ func TestLoadFromFileOrNew_NonExistent(t *testing.T) {
 	}
 }
 
+// saveKeysToFile saves a cache that holds k-0 to k-(n-1), with capacity n, to
+// a new file and returns its path.
+func saveKeysToFile(t *testing.T, n int) string {
+	t.Helper()
+
+	c, err := New[string, int](n)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	setKeys(t, c, "k", n)
+
+	path := filepath.Join(t.TempDir(), "cache")
+	if err := c.SaveToFile(path); err != nil {
+		t.Fatalf("SaveToFile error: %s", err)
+	}
+
+	return path
+}
+
+func TestLoadFromFileOrNewUsesGivenMaxEntries(t *testing.T) {
+	t.Parallel()
+
+	path := saveKeysToFile(t, 1000)
+
+	// A smaller cache keeps the newest entries.
+	small, err := LoadFromFileOrNew[string, int](path, 10)
+	if err != nil {
+		t.Fatalf("LoadFromFileOrNew error: %s", err)
+	}
+
+	var stats Stats
+
+	small.UpdateStats(&stats)
+
+	if stats.MaxEntries != 10 || stats.Evictions != 990 {
+		t.Fatalf("cache loaded with maxEntries 10 has MaxEntries %d and %d evictions; want 10 and 990",
+			stats.MaxEntries, stats.Evictions)
+	}
+
+	want := make([]string, 10)
+	for i := range want {
+		want[i] = fmt.Sprintf("k-%d", 990+i)
+	}
+
+	if got := slices.Collect(small.KeysFIFO()); !slices.Equal(got, want) {
+		t.Fatalf("cache loaded with maxEntries 10 holds %v, oldest first; want %v", got, want)
+	}
+
+	// A larger cache holds every saved entry and has room for more.
+	large, err := LoadFromFileOrNew[string, int](path, 2000)
+	if err != nil {
+		t.Fatalf("LoadFromFileOrNew error: %s", err)
+	}
+
+	stats.Reset()
+	large.UpdateStats(&stats)
+
+	if stats.MaxEntries != 2000 || stats.EntriesCount != 1000 {
+		t.Fatalf("cache loaded with maxEntries 2000 has MaxEntries %d and %d entries; want 2000 and 1000",
+			stats.MaxEntries, stats.EntriesCount)
+	}
+}
+
+func TestLoadFromFileOrNewRejectsInvalidMaxEntries(t *testing.T) {
+	t.Parallel()
+
+	path := saveKeysToFile(t, 10)
+
+	if _, err := LoadFromFileOrNew[string, int](path, 0); !errors.Is(err, ErrInvalidMaxEntries) {
+		t.Fatalf("LoadFromFileOrNew(path, 0) error %v; want %v", err, ErrInvalidMaxEntries)
+	}
+}
+
+func TestLoadFromFileOrNewReturnsEmptyCacheForTruncatedFile(t *testing.T) {
+	t.Parallel()
+
+	// Loading fails after it has inserted two entries.
+	path := filepath.Join(t.TempDir(), "cache")
+	if err := os.WriteFile(path, truncatedData(t, 2), 0o600); err != nil {
+		t.Fatalf("WriteFile error: %s", err)
+	}
+
+	c, err := LoadFromFileOrNew[string, int](path, 50)
+	if err != nil {
+		t.Fatalf("LoadFromFileOrNew error: %s", err)
+	}
+
+	var stats Stats
+
+	c.UpdateStats(&stats)
+
+	if want := (Stats{MaxEntries: 50}); stats != want {
+		t.Fatalf("cache loaded from a truncated file has stats %+v; want %+v", stats, want)
+	}
+}
+
 func TestSaveToLoadFrom(t *testing.T) {
 	const itemsCount = 1000
 	c, err := New[string, string](itemsCount * 2)
