@@ -1,6 +1,7 @@
 package fastcache
 
 import (
+	"cmp"
 	"fmt"
 	"iter"
 	"slices"
@@ -232,6 +233,101 @@ func (c *Cache[K, V]) Values() iter.Seq[V] {
 			}
 		}
 	}
+}
+
+// AllFIFO returns an iterator over all key-value pairs in the cache in FIFO
+// order: oldest first, which is the order in which the cache evicts them.
+// Updating a key keeps its place, while deleting a key and setting it again
+// makes it the newest.
+//
+// Unlike [Cache.All], AllFIFO copies and sorts every entry before it yields
+// the first pair, even when the loop stops early, and holds memory in
+// proportion to [Cache.Len] until the iteration ends.
+//
+// Note: It's safe to call other cache methods during iteration,
+// but the iteration may not reflect concurrent modifications.
+func (c *Cache[K, V]) AllFIFO() iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		for _, e := range c.entriesOldestFirst(1) {
+			if !yield(e.Key, e.Value) {
+				return
+			}
+		}
+	}
+}
+
+// KeysFIFO returns an iterator over all keys in the cache in FIFO order,
+// oldest first. It costs as much as [Cache.AllFIFO].
+//
+// Note: It's safe to call other cache methods during iteration,
+// but the iteration may not reflect concurrent modifications.
+func (c *Cache[K, V]) KeysFIFO() iter.Seq[K] {
+	return func(yield func(K) bool) {
+		for k := range c.AllFIFO() {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+// ValuesFIFO returns an iterator over all values in the cache in FIFO order,
+// oldest first. It costs as much as [Cache.AllFIFO].
+//
+// Note: It's safe to call other cache methods during iteration,
+// but the iteration may not reflect concurrent modifications.
+func (c *Cache[K, V]) ValuesFIFO() iter.Seq[V] {
+	return func(yield func(V) bool) {
+		for _, v := range c.AllFIFO() {
+			if !yield(v) {
+				return
+			}
+		}
+	}
+}
+
+// entriesOldestFirst returns the entries in insertion order, oldest first.
+// Up to concurrency goroutines copy the shards, each under its lock, so the
+// result does not show the whole cache at a single moment.
+func (c *Cache[K, V]) entriesOldestFirst(concurrency int) []*entry[K, V] {
+	shardEntries := make([][]*entry[K, V], shardsCount)
+
+	var workers sync.WaitGroup
+
+	for w := range concurrency {
+		workers.Go(func() {
+			for idx := w; idx < shardsCount; idx += concurrency {
+				shard := &c.shards[idx]
+				shard.mu.Lock()
+				shardEntries[idx] = shard.appendLocked(make([]*entry[K, V], 0, shard.entryCount))
+				shard.mu.Unlock()
+			}
+		})
+	}
+
+	workers.Wait()
+
+	entries := slices.Concat(shardEntries...)
+
+	// Sort references that hold the insertion number, so that comparisons do
+	// not load the entries.
+	type entryRef struct {
+		seq   uint64
+		entry *entry[K, V]
+	}
+
+	refs := make([]entryRef, len(entries))
+	for i, e := range entries {
+		refs[i] = entryRef{seq: e.seq, entry: e}
+	}
+
+	slices.SortFunc(refs, func(a, b entryRef) int { return cmp.Compare(a.seq, b.seq) })
+
+	for i, r := range refs {
+		entries[i] = r.entry
+	}
+
+	return entries
 }
 
 func (c *Cache[K, V]) shardIndexFromHash(h uint64) int {

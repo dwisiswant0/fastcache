@@ -1,7 +1,6 @@
 package fastcache
 
 import (
-	"cmp"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -9,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
-	"sync"
 
 	"github.com/minio/minlz"
 )
@@ -117,72 +114,16 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 		return fmt.Errorf("cannot encode maxEntries: %s", err)
 	}
 
-	type shardData struct {
-		idx     int
-		entries []*entry[K, V]
-	}
+	// load re-inserts entries in file order, so write them oldest first to
+	// keep the FIFO eviction order.
+	entries := c.entriesOldestFirst(concurrency)
 
-	shardCh := make(chan int, shardsCount)
-	resultCh := make(chan shardData, shardsCount)
-
-	var wg sync.WaitGroup
-	for range concurrency {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for idx := range shardCh {
-				shard := &c.shards[idx]
-				shard.mu.Lock()
-				entries := shard.appendLocked(make([]*entry[K, V], 0, shard.entryCount))
-				shard.mu.Unlock()
-				resultCh <- shardData{idx: idx, entries: entries}
-			}
-		}()
-	}
-
-	go func() {
-		for i := range shardsCount {
-			shardCh <- i
-		}
-		close(shardCh)
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	shardEntries := make([][]*entry[K, V], shardsCount)
-	for data := range resultCh {
-		shardEntries[data.idx] = data.entries
-	}
-
-	totalEntries := 0
-	for _, entries := range shardEntries {
-		totalEntries += len(entries)
-	}
-
-	if err := enc.Encode(totalEntries); err != nil {
+	if err := enc.Encode(len(entries)); err != nil {
 		return fmt.Errorf("cannot encode entry count: %s", err)
 	}
 
-	// load re-inserts entries in file order, so write them oldest first to
-	// keep the FIFO eviction order. Sorting small references instead of the
-	// entries keeps the cost independent of the size of V.
-	type entryRef struct {
-		seq        uint64
-		shard, pos int
-	}
-
-	refs := make([]entryRef, 0, totalEntries)
-
-	for shard, entries := range shardEntries {
-		for pos, e := range entries {
-			refs = append(refs, entryRef{seq: e.seq, shard: shard, pos: pos})
-		}
-	}
-
-	slices.SortFunc(refs, func(a, b entryRef) int { return cmp.Compare(a.seq, b.seq) })
-
-	for _, r := range refs {
-		if err := enc.Encode(shardEntries[r.shard][r.pos]); err != nil {
+	for _, e := range entries {
+		if err := enc.Encode(e); err != nil {
 			return fmt.Errorf("cannot encode entry: %s", err)
 		}
 	}

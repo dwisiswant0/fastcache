@@ -38,6 +38,8 @@
 //   - [Cache.All] - iterate over key-value pairs.
 //   - [Cache.Keys] - iterate over keys only.
 //   - [Cache.Values] - iterate over values only.
+//   - [Cache.AllFIFO], [Cache.KeysFIFO], [Cache.ValuesFIFO] - the same, in
+//     eviction order.
 //
 // # Atomic Operations
 //
@@ -62,7 +64,8 @@
 // the value from before or after it. Other operations
 // lock the key's shard, and adding a key also locks the FIFO queue. Iterator
 // methods copy one shard at a time while holding its lock, then yield entries
-// from the copy. Writes to a shard wait only during its copy, and the entries
+// from the copy, and the FIFO iterators copy every shard before they yield
+// any. Writes to a shard wait only during its copy, and the entries
 // yielded do not reflect a single moment for the whole cache.
 //
 // [VictoriaMetrics/fastcache]: https://github.com/VictoriaMetrics/fastcache.
