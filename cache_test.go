@@ -561,6 +561,186 @@ func TestCacheValues(t *testing.T) {
 	}
 }
 
+// newReorderedCache returns a full cache of k-0 to k-9 in which k-0 was
+// updated and k-1 was deleted and set again, with its keys and values in
+// eviction order.
+func newReorderedCache(t *testing.T) (*Cache[string, int], []string, []int) {
+	t.Helper()
+
+	const n = 10
+
+	c, err := New[string, int](n)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	setKeys(t, c, "k", n)
+
+	// An update keeps the place of k-0. Setting k-1 again after deleting it
+	// makes it the newest entry.
+	if err := c.Set("k-0", 100); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	c.Delete("k-1")
+
+	if err := c.Set("k-1", 1); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	keys := []string{"k-0", "k-2", "k-3", "k-4", "k-5", "k-6", "k-7", "k-8", "k-9", "k-1"}
+	values := []int{100, 2, 3, 4, 5, 6, 7, 8, 9, 1}
+
+	return c, keys, values
+}
+
+func TestCacheAllFIFOYieldsInEvictionOrder(t *testing.T) {
+	t.Parallel()
+
+	c, wantKeys, wantValues := newReorderedCache(t)
+
+	var keys []string
+
+	var values []int
+
+	for k, v := range c.AllFIFO() {
+		keys = append(keys, k)
+		values = append(values, v)
+	}
+
+	if !slices.Equal(keys, wantKeys) {
+		t.Fatalf("AllFIFO yielded keys %v; want %v", keys, wantKeys)
+	}
+
+	if !slices.Equal(values, wantValues) {
+		t.Fatalf("AllFIFO yielded values %v; want %v", values, wantValues)
+	}
+
+	for i, k := range wantKeys {
+		if err := c.Set(fmt.Sprintf("new-%d", i), i); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
+
+		if c.Has(k) {
+			t.Fatalf("Set %d did not evict %q, which AllFIFO yielded as the oldest", i, k)
+		}
+	}
+}
+
+func TestCacheKeysFIFOAndValuesFIFOYieldInEvictionOrder(t *testing.T) {
+	t.Parallel()
+
+	c, wantKeys, wantValues := newReorderedCache(t)
+
+	if got := slices.Collect(c.KeysFIFO()); !slices.Equal(got, wantKeys) {
+		t.Fatalf("KeysFIFO yielded %v; want %v", got, wantKeys)
+	}
+
+	if got := slices.Collect(c.ValuesFIFO()); !slices.Equal(got, wantValues) {
+		t.Fatalf("ValuesFIFO yielded %v; want %v", got, wantValues)
+	}
+
+	// An iterator that yields again after the loop stops makes range panic.
+	for range c.KeysFIFO() {
+		break
+	}
+
+	for range c.ValuesFIFO() {
+		break
+	}
+}
+
+func TestCacheAllFIFOAllowsWritesWhileIterating(t *testing.T) {
+	t.Parallel()
+
+	c, err := New[string, int](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	setKeys(t, c, "k", 50)
+
+	count := 0
+
+	for k := range c.AllFIFO() {
+		// These hang if the iterator holds a lock that writers take.
+		if err := c.Set("new-"+k, 0); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
+
+		c.Delete(k)
+
+		count++
+		if count == 10 {
+			break
+		}
+	}
+
+	if count != 10 {
+		t.Fatalf("unexpected count with early exit; got %d; want 10", count)
+	}
+}
+
+func TestCacheAllFIFOKeepsOrderWhileWritersRun(t *testing.T) {
+	t.Parallel()
+
+	const stable = 100
+
+	cache, err := New[string, int](10_000)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	setKeys(t, cache, "stable", stable)
+
+	want := make([]string, stable)
+	for i := range want {
+		want[i] = fmt.Sprintf("stable-%d", i)
+	}
+
+	var (
+		stop  atomic.Bool
+		group sync.WaitGroup
+	)
+
+	defer func() {
+		stop.Store(true)
+		group.Wait()
+	}()
+
+	// The writers add and delete newer keys, so the stable keys stay the
+	// oldest entries and nothing is evicted.
+	for w := range 4 {
+		group.Go(func() {
+			for i := 0; !stop.Load(); i++ {
+				key := fmt.Sprintf("churn-%d-%d", w, i)
+				if err := cache.Set(key, i); err != nil {
+					t.Errorf("Set error: %s", err)
+
+					return
+				}
+
+				cache.Delete(key)
+			}
+		})
+	}
+
+	for pass := range 100 {
+		got := make([]string, 0, stable)
+
+		for k := range cache.AllFIFO() {
+			got = append(got, k)
+			if len(got) == stable {
+				break
+			}
+		}
+
+		if !slices.Equal(got, want) {
+			t.Fatalf("pass %d: AllFIFO yielded %v first; want %v", pass, got, want)
+		}
+	}
+}
+
 func TestCacheLen(t *testing.T) {
 	c, err := New[string, string](100)
 	if err != nil {

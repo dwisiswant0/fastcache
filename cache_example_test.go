@@ -2,6 +2,7 @@ package fastcache_test
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 
 	"go.dw1.io/fastcache"
@@ -224,6 +225,90 @@ func ExampleCache_Values() {
 	// 100
 	// 200
 	// 300
+}
+
+// ExampleCache_AllFIFO demonstrates iterating in eviction order.
+func ExampleCache_AllFIFO() {
+	cache, err := fastcache.New[string, int](3)
+	if err != nil {
+		return
+	}
+	defer cache.Reset()
+
+	for i, key := range []string{"a", "b", "c"} {
+		if err := cache.Set(key, i); err != nil {
+			return
+		}
+	}
+
+	// Updating a key keeps its place.
+	if err := cache.Set("a", 10); err != nil {
+		return
+	}
+
+	for key, value := range cache.AllFIFO() {
+		fmt.Printf("%s:%d\n", key, value)
+	}
+
+	// The cache is full, so the next Set evicts the oldest entry.
+	if err := cache.Set("d", 3); err != nil {
+		return
+	}
+
+	fmt.Println("a evicted:", !cache.Has("a"))
+
+	// Output:
+	// a:10
+	// b:1
+	// c:2
+	// a evicted: true
+}
+
+// ExampleCache_KeysFIFO demonstrates collecting keys in eviction order.
+func ExampleCache_KeysFIFO() {
+	cache, err := fastcache.New[string, int](10)
+	if err != nil {
+		return
+	}
+	defer cache.Reset()
+
+	for i, key := range []string{"c", "a", "b"} {
+		if err := cache.Set(key, i); err != nil {
+			return
+		}
+	}
+
+	fmt.Println(slices.Collect(cache.KeysFIFO()))
+
+	// Output:
+	// [c a b]
+}
+
+// ExampleCache_ValuesFIFO demonstrates collecting values in eviction order.
+func ExampleCache_ValuesFIFO() {
+	cache, err := fastcache.New[string, int](10)
+	if err != nil {
+		return
+	}
+	defer cache.Reset()
+
+	for i, key := range []string{"c", "a", "b"} {
+		if err := cache.Set(key, i); err != nil {
+			return
+		}
+	}
+
+	// Deleting a key and setting it again makes it the newest.
+	cache.Delete("c")
+
+	if err := cache.Set("c", 3); err != nil {
+		return
+	}
+
+	fmt.Println(slices.Collect(cache.ValuesFIFO()))
+
+	// Output:
+	// [1 2 3]
 }
 
 // ExampleCache_Len demonstrates getting the cache size.
