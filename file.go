@@ -333,14 +333,16 @@ func decodeEntries[K comparable, S any](dec *gob.Decoder, load func(K, S) error)
 // little-endian body length and the body. See "STREAM FORMAT" in minlz's
 // SPEC.md.
 const (
-	chunkHeaderLen = 4
-	chunkTypeEOF   = 0x20
+	chunkHeaderLen     = 4
+	chunkTypeEOF       = 0x20
+	chunkTypeSkippable = 0x40 // the lowest type that a reader may skip
 )
 
 // streamReader passes one minlz stream through from r and returns io.EOF
 // after the stream's EOF chunk. minlz.Reader reads on after that chunk, for
 // a stream that may follow it, so from a pipe or a connection it would wait
-// for data that SaveTo never writes.
+// for data that SaveTo never writes. streamReader also rejects the chunk
+// types that SaveTo never writes.
 type streamReader struct {
 	r      io.Reader
 	header [chunkHeaderLen]byte
@@ -366,6 +368,16 @@ func (s *streamReader) Read(buf []byte) (int, error) {
 		// Stop at the end of the header, so the body's length is known
 		// before any of the body is read.
 		count, err := s.r.Read(buf[:min(len(buf), len(s.header)-s.read)])
+
+		// From 0x40 up, SaveTo writes only the stream identifier. minlz
+		// skips most of those types without a check, so a data chunk whose
+		// type byte was damaged into that range would silently go missing,
+		// and the entries decoded across the gap would differ from the
+		// saved ones.
+		if s.read == 0 && count > 0 && buf[0] >= chunkTypeSkippable && buf[0] != minlz.ChunkTypeStreamIdentifier {
+			return 0, fmt.Errorf("%w: unexpected chunk type %#x", minlz.ErrCorrupt, buf[0])
+		}
+
 		s.read += copy(s.header[s.read:], buf[:count])
 
 		if s.read == len(s.header) {
