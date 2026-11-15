@@ -15,7 +15,7 @@ A fast, generic, thread-safe cache for Go.
 * **FIFO eviction**: Oldest entries are evicted first when the cache is full.
 * **Iterators**: Go 1.23+ range-over-func support with `All()`, `Keys()`, `Values()`, and their eviction-order twins `AllFIFO()`, `KeysFIFO()`, `ValuesFIFO()`.
 * **Atomic operations**: `GetOrSet`, `GetAndDelete`, `SetIfAbsent` check and update a key in one step, with no locking in your code.
-* **Persistence**: Cache can be saved to file and loaded from file.
+* **Persistence**: Cache can be saved to file and loaded from file, whole or through functions that select and convert entries (`SaveToFunc`, `LoadFromFunc`).
 * **Simple API**: See [Go reference](https://pkg.go.dev/go.dw1.io/fastcache).
 
 ## Install
