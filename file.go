@@ -143,6 +143,12 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 // FIFO eviction order.
 func encode[E any](w io.Writer, maxEntries int, entries []E) error {
 	zw := minlz.NewWriter(w)
+	// zw runs a goroutine until it is closed, so the error paths must close
+	// it too. On success, the Close below reports its error.
+	defer func() {
+		_ = zw.Close()
+	}()
+
 	enc := gob.NewEncoder(zw)
 
 	if err := enc.Encode(maxEntries); err != nil {
