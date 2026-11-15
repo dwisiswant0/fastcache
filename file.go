@@ -2,6 +2,7 @@ package fastcache
 
 import (
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -40,18 +41,18 @@ func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) err
 	dir := filepath.Dir(filePath)
 	if _, err := os.Stat(dir); err != nil {
 		if !os.IsNotExist(err) {
-			return fmt.Errorf("cannot stat %q: %s", dir, err)
+			return fmt.Errorf("cannot stat %q: %w", dir, err)
 		}
 
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("cannot create dir %q: %s", dir, err)
+			return fmt.Errorf("cannot create dir %q: %w", dir, err)
 		}
 	}
 
 	// Save cache data into a temporary file.
 	tmpFile, err := os.CreateTemp(dir, "fastcache.tmp.*")
 	if err != nil {
-		return fmt.Errorf("cannot create temporary file in %q: %s", dir, err)
+		return fmt.Errorf("cannot create temporary file in %q: %w", dir, err)
 	}
 	tmpPath := tmpFile.Name()
 	defer func() {
@@ -66,7 +67,7 @@ func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) err
 	if err := c.save(tmpFile, concurrency); err != nil {
 		_ = tmpFile.Close()
 
-		return fmt.Errorf("cannot save cache data to %q: %s", tmpPath, err)
+		return fmt.Errorf("cannot save cache data to %q: %w", tmpPath, err)
 	}
 
 	if err := syncFile(tmpFile); err != nil {
@@ -76,11 +77,11 @@ func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) err
 	}
 
 	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("cannot close temporary file %q: %s", tmpPath, err)
+		return fmt.Errorf("cannot close temporary file %q: %w", tmpPath, err)
 	}
 
 	if err := os.Rename(tmpPath, filePath); err != nil {
-		return fmt.Errorf("cannot rename %q to %q: %s", tmpPath, filePath, err)
+		return fmt.Errorf("cannot rename %q to %q: %w", tmpPath, filePath, err)
 	}
 
 	return nil
@@ -152,21 +153,21 @@ func encode[E any](w io.Writer, maxEntries int, entries []E) error {
 	enc := gob.NewEncoder(zw)
 
 	if err := enc.Encode(maxEntries); err != nil {
-		return fmt.Errorf("cannot encode maxEntries: %s", err)
+		return fmt.Errorf("cannot encode maxEntries: %w", err)
 	}
 
 	if err := enc.Encode(len(entries)); err != nil {
-		return fmt.Errorf("cannot encode entry count: %s", err)
+		return fmt.Errorf("cannot encode entry count: %w", err)
 	}
 
 	for _, e := range entries {
 		if err := enc.Encode(e); err != nil {
-			return fmt.Errorf("cannot encode entry: %s", err)
+			return fmt.Errorf("cannot encode entry: %w", err)
 		}
 	}
 
 	if err := zw.Close(); err != nil {
-		return fmt.Errorf("cannot close minlz writer: %s", err)
+		return fmt.Errorf("cannot close minlz writer: %w", err)
 	}
 
 	return nil
@@ -264,6 +265,17 @@ func LoadFromFunc[K comparable, S any](r io.Reader, load func(K, S) error) error
 	return decodeEntries(dec, load)
 }
 
+// unexpectedEOF returns io.ErrUnexpectedEOF in place of io.EOF. After the
+// capacity, the data must still hold the entry count and every entry that it
+// promises, so data that ends before them was cut short.
+func unexpectedEOF(err error) error {
+	if errors.Is(err, io.EOF) {
+		return io.ErrUnexpectedEOF
+	}
+
+	return err
+}
+
 // newDecoder returns a decoder for the data that encode wrote to r, and the
 // capacity of the saved cache, which the data starts with.
 func newDecoder(r io.Reader) (*gob.Decoder, int, error) {
@@ -271,7 +283,7 @@ func newDecoder(r io.Reader) (*gob.Decoder, int, error) {
 
 	var maxEntries int
 	if err := dec.Decode(&maxEntries); err != nil {
-		return nil, 0, fmt.Errorf("cannot decode maxEntries: %s", err)
+		return nil, 0, fmt.Errorf("cannot decode maxEntries: %w", err)
 	}
 
 	return dec, maxEntries, nil
@@ -283,13 +295,13 @@ func newDecoder(r io.Reader) (*gob.Decoder, int, error) {
 func decodeEntries[K comparable, S any](dec *gob.Decoder, load func(K, S) error) error {
 	var count int
 	if err := dec.Decode(&count); err != nil {
-		return fmt.Errorf("cannot decode entry count: %s", err)
+		return fmt.Errorf("cannot decode entry count: %w", unexpectedEOF(err))
 	}
 
 	for i := range count {
 		var e entry[K, S]
 		if err := dec.Decode(&e); err != nil {
-			return fmt.Errorf("cannot decode entry %d: %s", i, err)
+			return fmt.Errorf("cannot decode entry %d: %w", i, unexpectedEOF(err))
 		}
 
 		if err := load(e.Key, e.Value); err != nil {
