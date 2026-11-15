@@ -197,3 +197,98 @@ func ExampleCache_SaveToFileConcurrent() {
 	// Output:
 	// Cache saved with concurrency
 }
+
+// ExampleSaveToFunc demonstrates saving some entries, converted to a type
+// that gob can encode.
+func ExampleSaveToFunc() {
+	// gob does not encode unexported fields, so SaveTo rejects session.
+	type session struct {
+		user  string
+		token string
+	}
+
+	cache, err := fastcache.New[string, session](10)
+	if err != nil {
+		return
+	}
+	defer cache.Reset()
+
+	if err := cache.Set("s1", session{user: "alice", token: "t1"}); err != nil {
+		return
+	}
+	if err := cache.Set("s2", session{token: "t2"}); err != nil {
+		return
+	}
+	if err := cache.Set("s3", session{user: "bob", token: "t3"}); err != nil {
+		return
+	}
+
+	// Save the user of each signed-in session, and never the token.
+	var buf bytes.Buffer
+
+	err = fastcache.SaveToFunc(cache, &buf, func(_ string, s session) (string, bool) {
+		return s.user, s.user != ""
+	})
+	if err != nil {
+		fmt.Println("Error saving:", err)
+		return
+	}
+
+	loaded, err := fastcache.LoadFrom[string, string](&buf)
+	if err != nil {
+		fmt.Println("Error loading:", err)
+		return
+	}
+	defer loaded.Reset()
+
+	for key, user := range loaded.AllFIFO() {
+		fmt.Println(key, user)
+	}
+
+	// Output:
+	// s1 alice
+	// s3 bob
+}
+
+// ExampleLoadFromFunc demonstrates loading saved entries into an existing
+// cache with a smaller capacity.
+func ExampleLoadFromFunc() {
+	saved, err := fastcache.New[string, int](10)
+	if err != nil {
+		return
+	}
+
+	for i, key := range []string{"a", "b", "c", "d"} {
+		if err := saved.Set(key, i); err != nil {
+			return
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := saved.SaveTo(&buf); err != nil {
+		fmt.Println("Error saving:", err)
+		return
+	}
+
+	saved.Reset()
+
+	// Entries load oldest first, so the cache keeps the newest that fit.
+	cache, err := fastcache.New[string, int](2)
+	if err != nil {
+		return
+	}
+	defer cache.Reset()
+
+	if err := fastcache.LoadFromFunc(&buf, cache.Set); err != nil {
+		fmt.Println("Error loading:", err)
+		return
+	}
+
+	for key, value := range cache.AllFIFO() {
+		fmt.Printf("%s:%d\n", key, value)
+	}
+
+	// Output:
+	// c:2
+	// d:3
+}

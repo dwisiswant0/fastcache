@@ -56,6 +56,11 @@
 // to/from [io.Writer]/[io.Reader] or files using [gob] encoding with [minlz]
 // compression.
 //
+// [SaveToFunc] saves the entries that a function selects, converted to values
+// of a type that gob can encode, so it can save a cache whose values gob
+// cannot encode. [LoadFromFunc] passes each saved entry to a function, such as
+// the Set method of a cache that already exists.
+//
 // # Thread Safety
 //
 // All [Cache] methods are safe for concurrent use by multiple goroutines.

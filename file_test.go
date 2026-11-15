@@ -2,15 +2,20 @@ package fastcache
 
 import (
 	"bytes"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/minio/minlz"
 )
 
 func TestSaveLoadSmall(t *testing.T) {
@@ -503,6 +508,260 @@ func TestLoadFrom_EmptyReader(t *testing.T) {
 	_, err := LoadFrom[string, string](&buf)
 	if err == nil {
 		t.Fatal("LoadFrom must return error for empty reader")
+	}
+}
+
+func TestSaveToFuncLoadFromFuncFilterAndConvert(t *testing.T) {
+	t.Parallel()
+
+	// SaveTo rejects item, since gob does not encode unexported fields.
+	type item struct {
+		data    string
+		private bool
+	}
+
+	type saved struct{ Data string }
+
+	c, err := New[string, *item](10)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	for i := range 10 {
+		if err := c.Set(fmt.Sprintf("k%d", i), &item{data: fmt.Sprintf("v%d", i), private: i%2 == 1}); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
+	}
+
+	var buf bytes.Buffer
+
+	err = SaveToFunc(c, &buf, func(_ string, v *item) (saved, bool) {
+		return saved{Data: v.data}, !v.private
+	})
+	if err != nil {
+		t.Fatalf("SaveToFunc error: %s", err)
+	}
+
+	// Loading oldest first leaves the newest saved entries in a smaller cache.
+	next, err := New[string, *item](3)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	err = LoadFromFunc(&buf, func(k string, s saved) error {
+		return next.Set(k, &item{data: s.Data})
+	})
+	if err != nil {
+		t.Fatalf("LoadFromFunc error: %s", err)
+	}
+
+	var got []string
+	for k, v := range next.AllFIFO() {
+		got = append(got, k+"="+v.data)
+	}
+
+	if want := []string{"k4=v4", "k6=v6", "k8=v8"}; !slices.Equal(got, want) {
+		t.Fatalf("loaded cache holds %v; want %v", got, want)
+	}
+}
+
+func TestSaveToFuncDataLoadsWithLoadFrom(t *testing.T) {
+	t.Parallel()
+
+	c, err := New[string, int](100)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	setKeys(t, c, "k", 5)
+
+	var buf bytes.Buffer
+
+	err = SaveToFunc(c, &buf, func(_ string, v int) (string, bool) {
+		return strconv.Itoa(v), true
+	})
+	if err != nil {
+		t.Fatalf("SaveToFunc error: %s", err)
+	}
+
+	loaded, err := LoadFrom[string, string](&buf)
+	if err != nil {
+		t.Fatalf("LoadFrom error: %s", err)
+	}
+
+	var stats Stats
+
+	loaded.UpdateStats(&stats)
+
+	if stats.MaxEntries != 100 {
+		t.Fatalf("loaded cache has MaxEntries %d; want 100", stats.MaxEntries)
+	}
+
+	got := slices.Collect(loaded.Values())
+	slices.Sort(got)
+
+	if want := []string{"0", "1", "2", "3", "4"}; !slices.Equal(got, want) {
+		t.Fatalf("loaded values %v; want %v", got, want)
+	}
+}
+
+func TestLoadFromFuncReadsSaveToDataOldestFirst(t *testing.T) {
+	t.Parallel()
+
+	c, err := New[string, int](10)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	setKeys(t, c, "k", 3)
+
+	// Setting k-0 again after deleting it makes it the newest entry.
+	c.Delete("k-0")
+
+	if err := c.Set("k-0", 0); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	var buf bytes.Buffer
+	if err := c.SaveTo(&buf); err != nil {
+		t.Fatalf("SaveTo error: %s", err)
+	}
+
+	var got []string
+
+	err = LoadFromFunc(&buf, func(k string, v int) error {
+		got = append(got, fmt.Sprintf("%s=%d", k, v))
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("LoadFromFunc error: %s", err)
+	}
+
+	if want := []string{"k-1=1", "k-2=2", "k-0=0"}; !slices.Equal(got, want) {
+		t.Fatalf("LoadFromFunc loaded %v; want %v", got, want)
+	}
+}
+
+func TestLoadFromFuncStopsAtLoadError(t *testing.T) {
+	t.Parallel()
+
+	c, err := New[string, int](10)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	setKeys(t, c, "k", 5)
+
+	var buf bytes.Buffer
+	if err := c.SaveTo(&buf); err != nil {
+		t.Fatalf("SaveTo error: %s", err)
+	}
+
+	errStop := errors.New("stop")
+	calls := 0
+
+	err = LoadFromFunc(&buf, func(string, int) error {
+		calls++
+		if calls == 2 {
+			return errStop
+		}
+
+		return nil
+	})
+	if err != errStop { //nolint:errorlint // LoadFromFunc must return the error of load itself.
+		t.Fatalf("LoadFromFunc error %v; want %v", err, errStop)
+	}
+
+	if calls != 2 {
+		t.Fatalf("LoadFromFunc called load %d times after it failed on call 2", calls)
+	}
+}
+
+// truncatedData returns data saved from a cache of capacity 100 whose entry
+// count promises one more entry than follows it: k-0 to k-(n-1), with values
+// 0 to n-1.
+func truncatedData(t *testing.T, n int) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	zw := minlz.NewWriter(&buf)
+	enc := gob.NewEncoder(zw)
+
+	write := func(v any) {
+		if err := enc.Encode(v); err != nil {
+			t.Fatalf("Encode error: %s", err)
+		}
+	}
+
+	write(100)
+	write(n + 1)
+
+	for i := range n {
+		write(&entry[string, int]{Key: fmt.Sprintf("k-%d", i), Value: i})
+	}
+
+	if err := zw.Close(); err != nil {
+		t.Fatalf("Close error: %s", err)
+	}
+
+	return buf.Bytes()
+}
+
+func TestLoadFromFuncReturnsErrorForTruncatedData(t *testing.T) {
+	t.Parallel()
+
+	var got []string
+
+	err := LoadFromFunc(bytes.NewReader(truncatedData(t, 2)), func(k string, _ int) error {
+		got = append(got, k)
+
+		return nil
+	})
+	if err == nil {
+		t.Fatal("LoadFromFunc must return error for truncated data")
+	}
+
+	if want := []string{"k-0", "k-1"}; !slices.Equal(got, want) {
+		t.Fatalf("LoadFromFunc passed %v to load before it failed; want %v", got, want)
+	}
+}
+
+func TestLoadFromFunc_EmptyReader(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+
+	err := LoadFromFunc(&buf, func(string, int) error { return nil })
+	if err == nil {
+		t.Fatal("LoadFromFunc must return error for empty reader")
+	}
+}
+
+func TestSaveToFuncRejectsUnsupportedSavedType(t *testing.T) {
+	t.Parallel()
+
+	c, err := New[string, int](10)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	setKeys(t, c, "k", 1)
+
+	type unexported struct{ n int }
+
+	var buf bytes.Buffer
+
+	err = SaveToFunc(c, &buf, func(_ string, v int) (unexported, bool) {
+		return unexported{n: v}, true
+	})
+	if !errors.Is(err, errUnsupportedType) {
+		t.Fatalf("SaveToFunc error %v; want %v", err, errUnsupportedType)
+	}
+
+	if buf.Len() != 0 {
+		t.Fatalf("SaveToFunc wrote %d bytes before failing", buf.Len())
 	}
 }
 

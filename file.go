@@ -92,12 +92,40 @@ func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) err
 // The data is serialized using [gob] and compressed with [minlz].
 // SaveTo may be called concurrently with other ops on the cache.
 //
-// The saved data may be loaded with [LoadFrom].
+// The saved data may be loaded with [LoadFrom] or [LoadFromFunc].
 //
 // SaveTo returns an error if K or V has a field that gob would not encode,
 // such as an unexported struct field.
 func (c *Cache[K, V]) SaveTo(w io.Writer) error {
 	return c.save(w, 1)
+}
+
+// SaveToFunc saves to w the entries of c for which save reports true, oldest
+// first, with the values that save returns in place of their own. Use it to
+// save only some entries, or to save values of a type that gob cannot encode,
+// such as a struct with unexported fields, as values of a type it can.
+//
+// The data is serialized using [gob] and compressed with [minlz], as with
+// [Cache.SaveTo]. It may be loaded with [LoadFrom] or [LoadFromFunc] as
+// values of type S. SaveToFunc may be called concurrently with other ops on
+// the cache.
+//
+// SaveToFunc returns an error if K or S has a field that gob would not
+// encode, such as an unexported struct field.
+func SaveToFunc[K comparable, V, S any](c *Cache[K, V], w io.Writer, save func(K, V) (S, bool)) error {
+	if err := checkGobTypes[K, S](); err != nil {
+		return err
+	}
+
+	var saved []entry[K, S]
+
+	for _, e := range c.entriesOldestFirst(1) {
+		if s, ok := save(e.Key, e.Value); ok {
+			saved = append(saved, entry[K, S]{Key: e.Key, Value: s})
+		}
+	}
+
+	return encode(w, c.maxEntries, saved)
 }
 
 func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
@@ -107,16 +135,20 @@ func (c *Cache[K, V]) save(w io.Writer, concurrency int) error {
 		return err
 	}
 
+	return encode(w, c.maxEntries, c.entriesOldestFirst(concurrency))
+}
+
+// encode writes the capacity of the saved cache, the number of entries, and
+// the entries, each an entry or a pointer to one. Loading inserts the entries
+// in the order they are written, so they must come oldest first to keep the
+// FIFO eviction order.
+func encode[E any](w io.Writer, maxEntries int, entries []E) error {
 	zw := minlz.NewWriter(w)
 	enc := gob.NewEncoder(zw)
 
-	if err := enc.Encode(c.maxEntries); err != nil {
+	if err := enc.Encode(maxEntries); err != nil {
 		return fmt.Errorf("cannot encode maxEntries: %s", err)
 	}
-
-	// load re-inserts entries in file order, so write them oldest first to
-	// keep the FIFO eviction order.
-	entries := c.entriesOldestFirst(concurrency)
 
 	if err := enc.Encode(len(entries)); err != nil {
 		return fmt.Errorf("cannot encode entry count: %s", err)
@@ -181,12 +213,9 @@ func LoadFrom[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
 }
 
 func load[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
-	zr := minlz.NewReader(r)
-	dec := gob.NewDecoder(zr)
-
-	var maxEntries int
-	if err := dec.Decode(&maxEntries); err != nil {
-		return nil, fmt.Errorf("cannot decode maxEntries: %s", err)
+	dec, maxEntries, err := newDecoder(r)
+	if err != nil {
+		return nil, err
 	}
 
 	c, err := New[K, V](maxEntries)
@@ -194,20 +223,64 @@ func load[K comparable, V any](r io.Reader) (*Cache[K, V], error) {
 		return nil, fmt.Errorf("cannot create cache: %w", err)
 	}
 
-	var totalEntries int
-	if err := dec.Decode(&totalEntries); err != nil {
-		return nil, fmt.Errorf("cannot decode entry count: %s", err)
-	}
-
-	for i := 0; i < totalEntries; i++ {
-		var e entry[K, V]
-		if err := dec.Decode(&e); err != nil {
-			return nil, fmt.Errorf("cannot decode entry %d: %s", i, err)
-		}
-		if err := c.Set(e.Key, e.Value); err != nil {
-			return nil, fmt.Errorf("cannot insert entry %d: %w", i, err)
-		}
+	if err := decodeEntries(dec, c.Set); err != nil {
+		return nil, err
 	}
 
 	return c, nil
+}
+
+// LoadFromFunc calls load with the key and value of each entry saved in r,
+// oldest first, and stops at the first error load returns. It returns that
+// error, or an error if the data is corrupted.
+//
+// LoadFromFunc reads the data that [Cache.SaveTo], [Cache.SaveToFile] and
+// [SaveToFunc] write, and S must be a type that gob can decode the saved
+// values into. It ignores the capacity of the saved cache: to load the entries
+// into a cache c of any capacity, pass c.Set as load. An empty c then keeps the
+// newest entries when the data holds more than it can. When LoadFromFunc fails
+// partway, the entries before the failure have already been passed to load.
+func LoadFromFunc[K comparable, S any](r io.Reader, load func(K, S) error) error {
+	dec, _, err := newDecoder(r)
+	if err != nil {
+		return err
+	}
+
+	return decodeEntries(dec, load)
+}
+
+// newDecoder returns a decoder for the data that encode wrote to r, and the
+// capacity of the saved cache, which the data starts with.
+func newDecoder(r io.Reader) (*gob.Decoder, int, error) {
+	dec := gob.NewDecoder(minlz.NewReader(r))
+
+	var maxEntries int
+	if err := dec.Decode(&maxEntries); err != nil {
+		return nil, 0, fmt.Errorf("cannot decode maxEntries: %s", err)
+	}
+
+	return dec, maxEntries, nil
+}
+
+// decodeEntries decodes the entries that follow the capacity and calls load
+// for each, in the order they were written. It returns the first error that
+// load returns.
+func decodeEntries[K comparable, S any](dec *gob.Decoder, load func(K, S) error) error {
+	var count int
+	if err := dec.Decode(&count); err != nil {
+		return fmt.Errorf("cannot decode entry count: %s", err)
+	}
+
+	for i := range count {
+		var e entry[K, S]
+		if err := dec.Decode(&e); err != nil {
+			return fmt.Errorf("cannot decode entry %d: %s", i, err)
+		}
+
+		if err := load(e.Key, e.Value); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
