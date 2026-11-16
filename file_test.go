@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -183,6 +184,64 @@ func TestSaveToFileSyncError(t *testing.T) {
 	for _, e := range entries {
 		if e.Name() != filepath.Base(filePath) {
 			t.Errorf("unexpected leftover file %q", e.Name())
+		}
+	}
+}
+
+//nolint:paralleltest // It counts goroutines, so no other test may run with it.
+func TestFailedSavesStopTheirGoroutines(t *testing.T) {
+	// minlz runs a writer goroutine only when GOMAXPROCS is above 1.
+	prev := runtime.GOMAXPROCS(2)
+
+	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+
+	cache, err := New[int, []byte](16)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	// More than one 2 MiB minlz block, so the writer fails while entries
+	// are still being encoded, not only in Close.
+	for i := range 16 {
+		err = cache.Set(i, make([]byte, 1<<20))
+		if err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
+	}
+
+	// Writes to a pipe whose reader is closed fail at once.
+	reader, writer := io.Pipe()
+	_ = reader.Close()
+
+	saves := []struct {
+		name string
+		run  func() error
+	}{
+		{"SaveTo", func() error { return cache.SaveTo(writer) }},
+		{"SaveToFunc", func() error {
+			return SaveToFunc(cache, writer, func(_ int, v []byte) ([]byte, bool) { return v, true })
+		}},
+	}
+
+	for _, save := range saves {
+		before := runtime.NumGoroutine()
+
+		for range 10 {
+			err = save.run()
+			if err == nil {
+				t.Fatalf("%s into a closed pipe returned no error", save.name)
+			}
+		}
+
+		// The goroutines that compress blocks may exit just after the save
+		// returns.
+		deadline := time.Now().Add(5 * time.Second)
+		for runtime.NumGoroutine() > before {
+			if time.Now().After(deadline) {
+				t.Fatalf("%d goroutines before 10 failed %s calls; %d after 5s", before, save.name, runtime.NumGoroutine())
+			}
+
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
