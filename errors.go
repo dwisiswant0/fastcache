@@ -12,4 +12,6 @@ var (
 	errUnknownOp = errors.New("fastcache: unknown operation")
 
 	errUnsupportedType = errors.New("fastcache: unsupported type for persistence")
+
+	errTrailingData = errors.New("fastcache: saved data continues after the last entry")
 )
