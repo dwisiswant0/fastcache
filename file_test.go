@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/minio/minlz"
@@ -664,6 +665,69 @@ func TestLoadFrom_EmptyReader(t *testing.T) {
 	_, err := LoadFrom[string, string](&buf)
 	if err == nil {
 		t.Fatal("LoadFrom must return error for empty reader")
+	}
+}
+
+func TestSaveAndLoadErrorsWrapTheirCause(t *testing.T) {
+	t.Parallel()
+
+	// closedPipe returns a writer whose reader is closed, so its writes fail
+	// with io.ErrClosedPipe.
+	closedPipe := func() io.Writer {
+		r, w := io.Pipe()
+		_ = r.Close()
+
+		return w
+	}
+
+	cache, err := New[string, int](10)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	setKeys(t, cache, "k", 1)
+
+	hidden, err := New[int, hiddenFields](10)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "cache")
+	truncated := truncatedData(t, 2)
+
+	tests := []struct {
+		name string
+		call func() error
+		want error
+	}{
+		{"SaveTo", func() error { return cache.SaveTo(closedPipe()) }, io.ErrClosedPipe},
+		{"SaveToFunc", func() error {
+			return SaveToFunc(cache, closedPipe(), func(_ string, v int) (int, bool) { return v, true })
+		}, io.ErrClosedPipe},
+		{"SaveToFile", func() error { return hidden.SaveToFile(path) }, errUnsupportedType},
+		{"LoadFrom", func() error {
+			_, err := LoadFrom[string, int](iotest.ErrReader(io.ErrClosedPipe))
+
+			return err
+		}, io.ErrClosedPipe},
+		{"LoadFromFunc", func() error {
+			return LoadFromFunc(iotest.ErrReader(io.ErrClosedPipe), func(string, int) error { return nil })
+		}, io.ErrClosedPipe},
+		// The data ends cleanly after two entries, but the count promises three.
+		{"LoadFromFunc of truncated data", func() error {
+			return LoadFromFunc(bytes.NewReader(truncated), func(string, int) error { return nil })
+		}, io.ErrUnexpectedEOF},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := test.call()
+			if !errors.Is(err, test.want) {
+				t.Fatalf("%s error %v; want it to wrap %v", test.name, err, test.want)
+			}
+		})
 	}
 }
 
