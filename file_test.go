@@ -2,6 +2,7 @@ package fastcache
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -1085,6 +1086,76 @@ func TestLoadFromFuncReturnsErrorForTruncatedData(t *testing.T) {
 	if want := []string{"k-0", "k-1"}; !slices.Equal(got, want) {
 		t.Fatalf("LoadFromFunc passed %v to load before it failed; want %v", got, want)
 	}
+}
+
+func TestLoadFromFuncRejectsSkippableChunks(t *testing.T) {
+	t.Parallel()
+
+	// The value of "a" spans the stream's first three data chunks, and "b"
+	// follows with enough bytes that gob still decodes "a" when one of
+	// those chunks is skipped.
+	saved := map[string][]byte{"a": make([]byte, 5<<20), "b": make([]byte, 3<<20)}
+	_, _ = rand.Read(saved["a"])
+
+	cache, err := New[string, []byte](2)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+
+	for _, k := range []string{"a", "b"} {
+		err = cache.Set(k, saved[k])
+		if err != nil {
+			t.Fatalf("Set(%q) error: %s", k, err)
+		}
+	}
+
+	var buf bytes.Buffer
+
+	err = cache.SaveTo(&buf)
+	if err != nil {
+		t.Fatalf("SaveTo error: %s", err)
+	}
+
+	// SaveTo writes no skippable chunk, so one can only come from damage,
+	// here to the type of the second data chunk.
+	for _, typ := range []byte{0x41, 0x81, minlz.ChunkTypePadding} {
+		data := bytes.Clone(buf.Bytes())
+		data[chunkOffset(t, data, 2)] = typ
+
+		err := LoadFromFunc(bytes.NewReader(data), func(k string, v []byte) error {
+			if !bytes.Equal(v, saved[k]) {
+				t.Errorf("chunk type %#x: LoadFromFunc passed a damaged value of %q to load", typ, k)
+			}
+
+			return nil
+		})
+		if !errors.Is(err, minlz.ErrCorrupt) {
+			t.Errorf("chunk type %#x: LoadFromFunc error %v; want %v", typ, err, minlz.ErrCorrupt)
+		}
+	}
+}
+
+// chunkOffset returns the offset in data of the given chunk of the minlz
+// stream, counting the stream identifier as chunk 0.
+func chunkOffset(t *testing.T, data []byte, chunk int) int {
+	t.Helper()
+
+	offset := 0
+
+	for range chunk {
+		if offset+chunkHeaderLen > len(data) {
+			t.Fatalf("data has fewer than %d chunks", chunk+1)
+		}
+
+		header := data[offset : offset+chunkHeaderLen]
+		offset += chunkHeaderLen + (int(header[1]) | int(header[2])<<8 | int(header[3])<<16)
+	}
+
+	if offset >= len(data) {
+		t.Fatalf("data has fewer than %d chunks", chunk+1)
+	}
+
+	return offset
 }
 
 func TestLoadFromFunc_EmptyReader(t *testing.T) {
