@@ -13,6 +13,7 @@ A fast, generic, thread-safe cache for Go.
 * **Zero allocations**: No allocations on `Get` ops.
 * **Thread-safe**: Concurrent goroutines may read and write into a single cache instance.
 * **FIFO eviction**: Oldest entries are evicted first when the cache is full.
+* **Weighted capacity**: `NewWeighted` also bounds the total weight of the entries, such as the bytes of their values.
 * **Iterators**: Go 1.23+ range-over-func support with `All()`, `Keys()`, `Values()`, and their eviction-order twins `AllFIFO()`, `KeysFIFO()`, `ValuesFIFO()`.
 * **Atomic operations**: `GetOrSet`, `GetAndDelete`, `SetIfAbsent` check and update a key in one step, with no locking in your code.
 * **Persistence**: Cache can be saved to file and loaded from file, whole or through functions that select and convert entries (`SaveToFunc`, `LoadFromFunc`).
@@ -127,14 +128,14 @@ The cache uses a sharded design for concurrent scalability:
 * **512 shards**: Writers lock only the shard of their key, reducing contention on multi-core CPUs.
 * **Open-addressing hash table per shard**: Entries are stored by the rapidhash value of their key, for O(1) lookups.
 * **`Get` without locking**: Readers probe the table with atomic loads, so reading one key scales with the number of CPUs. A miss that overlaps a delete in the same shard probes again under the shard's lock. Hit and miss counts are striped per CPU.
-* **Cache-wide FIFO queue**: One queue tracks insertion order across all shards, so the oldest entry in the cache is evicted first. Adding a new key also locks this queue.
+* **Cache-wide FIFO queue**: One queue tracks insertion order across all shards, so the oldest entry in the cache is evicted first. Adding a new key also locks this queue, as does making a value heavier in a cache made by `NewWeighted`.
 
 ## Differences from Original
 
 | Aspect | Original fastcache | This fork |
 |--------|-------------------|-----------|
 | **API** | `[]byte` keys/values | Generic `[K, V]` |
-| **Capacity** | Bytes-based | Entry-count based |
+| **Capacity** | Bytes-based | Entry count, plus total weight with `NewWeighted` |
 | **Storage** | Ring buffer of bytes | Open-addressing hash table per shard |
 | **Eviction** | FIFO (by byte position) | FIFO (by insertion order) |
 | **Allocations** | 1 alloc/Get | Zero |
@@ -335,7 +336,7 @@ make bench -C benchmarks
 ## Limitations
 
 * No cache expiration: entries are evicted only when the cache is full (FIFO order).
-* No size-based limits: capacity is by entry count, not bytes.
+* No memory accounting: `NewWeighted` bounds the total of the weights that your function returns, not the memory the cache uses.
 
 ## Status
 

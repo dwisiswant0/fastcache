@@ -24,6 +24,12 @@ type Cache[K comparable, V any] struct {
 	seq        uint64       // last insertion number, guarded by orderMu
 	entryCount atomic.Int64 // global entry count for accurate capacity enforcement
 
+	// NewWeighted sets weigh and maxWeight. In a cache made by New, weigh is
+	// nil and every entry weighs 0, so a maxWeight of 0 still fits them all.
+	weigh     func(K, V) int
+	maxWeight int
+	weight    atomic.Int64 // total weight of the entries
+
 	// Every Get reads gets and getsStriped. The padding keeps them off the
 	// cache lines that writers dirty: the fields above, and whatever the
 	// allocator places after a Cache.
@@ -87,11 +93,57 @@ func New[K comparable, V any](maxEntries int) (*Cache[K, V], error) {
 	return c, nil
 }
 
+// NewWeighted returns a new cache that holds at most maxEntries entries whose
+// weights add up to at most maxWeight.
+//
+// weigh returns the weight of an entry, such as the length of its value. The
+// cache calls it before storing a value and keeps the weight until the entry
+// leaves the cache, so later changes to data that the value points to do not
+// change its weight.
+//
+// When a new or heavier value does not fit, the oldest entries are evicted
+// (FIFO) until it does. A Set that makes a value heavier evicts only other
+// entries, so its key stays in the cache and keeps its place. Storing a value
+// whose weight is negative or greater than maxWeight returns
+// [ErrInvalidWeight] and leaves the cache unchanged.
+//
+// To bound the cache by weight alone, pass [math.MaxInt] as maxEntries. The
+// cache allocates storage as entries are stored, not up front.
+//
+// [LoadFrom] and [LoadFromFile] return caches bounded only by entry count. To
+// load saved entries into a weighted cache, pass its [Cache.Set] to
+// [LoadFromFunc], which then stops with [ErrInvalidWeight] at the first saved
+// value heavier than maxWeight.
+//
+// NewWeighted returns an error if maxEntries or maxWeight is not positive, or
+// if weigh is nil.
+func NewWeighted[K comparable, V any](maxEntries, maxWeight int, weigh func(K, V) int) (*Cache[K, V], error) {
+	if maxWeight <= 0 {
+		return nil, fmt.Errorf("%w: got %d", ErrInvalidMaxWeight, maxWeight)
+	}
+
+	if weigh == nil {
+		return nil, errNilWeigh
+	}
+
+	c, err := New[K, V](maxEntries)
+	if err != nil {
+		return nil, err
+	}
+
+	c.weigh = weigh
+	c.maxWeight = maxWeight
+
+	return c, nil
+}
+
 // Set stores (k, v) in the cache.
 //
 // The stored entry may be evicted at any time due to cache overflow.
 //
 // Set returns an error if the cache cannot evict an existing entry while full.
+// In a cache made by [NewWeighted], it returns [ErrInvalidWeight] if the
+// weight of v is negative or greater than maxWeight.
 func (c *Cache[K, V]) Set(k K, v V) error {
 	h := c.hasher(k)
 	idx := c.shardIndexFromHash(h)
@@ -132,6 +184,8 @@ func (c *Cache[K, V]) Has(k K) bool {
 // The loaded result is true if the value was loaded, false if stored.
 //
 // GetOrSet returns an error if the cache cannot evict an existing entry while full.
+// In a cache made by [NewWeighted], it returns [ErrInvalidWeight] if k is
+// absent and the weight of v is negative or greater than maxWeight.
 func (c *Cache[K, V]) GetOrSet(k K, v V) (actual V, loaded bool, err error) {
 	h := c.hasher(k)
 	idx := c.shardIndexFromHash(h)
@@ -144,6 +198,8 @@ func (c *Cache[K, V]) GetOrSet(k K, v V) (actual V, loaded bool, err error) {
 // Returns true if the value was stored, false if the key already existed.
 //
 // SetIfAbsent returns an error if the cache cannot evict an existing entry while full.
+// In a cache made by [NewWeighted], it returns [ErrInvalidWeight] if k is
+// absent and the weight of v is negative or greater than maxWeight.
 func (c *Cache[K, V]) SetIfAbsent(k K, v V) (stored bool, err error) {
 	h := c.hasher(k)
 	idx := c.shardIndexFromHash(h)
@@ -178,6 +234,7 @@ func (c *Cache[K, V]) Reset() {
 
 	c.order = slotRing{}
 	c.entryCount.Store(0)
+	c.weight.Store(0)
 
 	// Get adds to gets without a lock, so Reset zeroes the cells in place
 	// instead of replacing the slice.
@@ -347,7 +404,34 @@ func hashStringKey[K comparable](k K) uint64 {
 	return rapidhash.HashString(any(k).(string))
 }
 
-func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) (result[V], error) {
+// weightOf returns the weight of (k, v), which is 0 in a cache made by New. It
+// returns ErrInvalidWeight for a weight that no eviction can make room for.
+func (c *Cache[K, V]) weightOf(k K, v V) (int, error) {
+	if c.weigh == nil {
+		return 0, nil
+	}
+
+	w := c.weigh(k, v)
+	if w < 0 || w > c.maxWeight {
+		return 0, fmt.Errorf("%w: got %d, max weight %d", ErrInvalidWeight, w, c.maxWeight)
+	}
+
+	return w, nil
+}
+
+// hasRoom reports whether the cache can take extra more weight and, if
+// newEntry is true, one more entry.
+func (c *Cache[K, V]) hasRoom(extra int, newEntry bool) bool {
+	if newEntry && c.entryCount.Load() >= int64(c.maxEntries) {
+		return false
+	}
+
+	return int64(extra) <= int64(c.maxWeight)-c.weight.Load()
+}
+
+// runInsert stores k unless op leaves an existing value in place. w is the
+// weight of v.
+func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V, w int) (result[V], error) {
 	c.orderMu.Lock()
 	defer c.orderMu.Unlock()
 
@@ -357,15 +441,24 @@ func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) (result[V
 		shard := &c.shards[idx]
 		shard.mu.Lock()
 
+		// need is the weight that storing v adds. Only Set replaces a value,
+		// and a heavier one needs room first: eviction then skips keep, the
+		// insertion number of k's entry, so that k stays in the cache, in its
+		// place, while Set makes room. Insertion numbers start at 1, so a keep
+		// of 0 means that k is absent, and skips nothing.
+		need, keep := w, uint64(0)
+
 		if t, pos, e := shard.findLocked(hash, k); pos >= 0 {
-			result, err := c.handleExisting(op, shard, t, pos, e, v)
-			shard.mu.Unlock()
+			need, keep = w-e.weight, e.seq
 
-			return result, err
-		}
+			if op != opSet || c.hasRoom(need, false) {
+				result, err := c.handleExisting(op, shard, t, pos, e, v, w)
+				shard.mu.Unlock()
 
-		if c.entryCount.Load() < int64(c.maxEntries) {
-			result, err := c.handleInsert(op, idx, hash, k, v, shard)
+				return result, err
+			}
+		} else if c.hasRoom(need, true) {
+			result, err := c.handleInsert(op, idx, hash, k, v, w, shard)
 			shard.mu.Unlock()
 
 			return result, err
@@ -374,19 +467,23 @@ func (c *Cache[K, V]) runInsert(op op, idx int, hash uint64, k K, v V) (result[V
 
 		// Deletes do not take orderMu, so since the check above they may
 		// have removed every entry left to evict. That leaves room, and the
-		// next pass inserts k.
-		if !c.evictOldestLocked() && c.entryCount.Load() >= int64(c.maxEntries) {
+		// next pass stores v.
+		if !c.evictOldestLocked(keep) && !c.hasRoom(need, keep == 0) {
 			return result[V]{}, fmt.Errorf("%w: entry count=%d, max entries=%d", ErrEvictionFailed, c.entryCount.Load(), c.maxEntries)
 		}
 	}
 }
 
 func (c *Cache[K, V]) handleExisting(
-	op op, shard *shard[K, V], t *table[K, V], pos int, e *entry[K, V], v V,
+	op op, shard *shard[K, V], t *table[K, V], pos int, e *entry[K, V], v V, w int,
 ) (result[V], error) {
 	switch op {
 	case opSet:
-		shard.replaceLocked(t, pos, e, v)
+		shard.replaceLocked(t, pos, e, v, w)
+
+		if w != e.weight {
+			c.weight.Add(int64(w - e.weight))
+		}
 
 		return result[V]{}, nil
 	case opGetOrSet:
@@ -400,7 +497,9 @@ func (c *Cache[K, V]) handleExisting(
 	}
 }
 
-func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard *shard[K, V]) (result[V], error) {
+func (c *Cache[K, V]) handleInsert(
+	op op, idx int, hash uint64, k K, v V, w int, shard *shard[K, V],
+) (result[V], error) {
 	var res result[V]
 
 	switch op {
@@ -417,24 +516,44 @@ func (c *Cache[K, V]) handleInsert(op op, idx int, hash uint64, k K, v V, shard 
 	}
 
 	c.seq++
-	shard.insertLocked(&entry[K, V]{Key: k, Value: v, seq: c.seq, hash: hash})
+	shard.insertLocked(&entry[K, V]{Key: k, Value: v, seq: c.seq, hash: hash, weight: w})
 	c.order.push(slot{shard: idx, hash: hash, seq: c.seq})
 	c.entryCount.Add(1)
+
+	if w != 0 {
+		c.weight.Add(int64(w))
+	}
 
 	return res, nil
 }
 
-func (c *Cache[K, V]) evictOldestLocked() bool {
+// evictOldestLocked evicts the oldest entry other than the one whose insertion
+// number is keep, which keeps its place. It reports whether it evicted one.
+func (c *Cache[K, V]) evictOldestLocked(keep uint64) bool {
 	for c.order.len > 0 {
 		slot := c.order.pop()
 
 		shard := &c.shards[slot.shard]
 		shard.mu.Lock()
 		if t, pos := shard.findSeqLocked(slot.hash, slot.seq); pos >= 0 {
+			if slot.seq == keep {
+				shard.mu.Unlock()
+
+				evicted := c.evictOldestLocked(0)
+				c.order.pushFront(slot)
+
+				return evicted
+			}
+
+			w := t.slots[pos].Load().weight
 			shard.removeLocked(t, pos)
 			shard.evictions++
 			shard.mu.Unlock()
 			c.entryCount.Add(-1)
+
+			if w != 0 {
+				c.weight.Add(-int64(w))
+			}
 
 			return true
 		}
@@ -487,6 +606,14 @@ func (r *slotRing) push(s slot) {
 	}
 
 	r.buf[r.index(r.len)] = s
+	r.len++
+}
+
+// pushFront adds s as the oldest slot. The ring must have a free cell, such as
+// the one that pop frees.
+func (r *slotRing) pushFront(s slot) {
+	r.head = r.index(len(r.buf) - 1)
+	r.buf[r.head] = s
 	r.len++
 }
 

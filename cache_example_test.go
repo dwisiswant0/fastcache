@@ -1,6 +1,7 @@
 package fastcache_test
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -578,4 +579,34 @@ func ExampleCache_UpdateStats() {
 	// Deletes: 1
 	// Current entries: 1
 	// Max entries: 10
+}
+
+// ExampleNewWeighted bounds a cache by the total length of its values.
+func ExampleNewWeighted() {
+	// Hold at most 100 entries whose values add up to at most 10 bytes.
+	cache, err := fastcache.NewWeighted(100, 10, func(_ string, v []byte) int {
+		return len(v)
+	})
+	if err != nil {
+		return
+	}
+	defer cache.Reset()
+
+	for _, k := range []string{"a", "b", "c"} {
+		if err := cache.Set(k, []byte("1234")); err != nil {
+			return
+		}
+	}
+
+	// The third value would have brought the total to 12 bytes, so the
+	// oldest entry was evicted to make room for it.
+	fmt.Println(slices.Collect(cache.KeysFIFO()))
+
+	// A value heavier than the whole cache is rejected.
+	err = cache.Set("d", make([]byte, 11))
+	fmt.Println(errors.Is(err, fastcache.ErrInvalidWeight))
+
+	// Output:
+	// [b c]
+	// true
 }

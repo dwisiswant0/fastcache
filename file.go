@@ -177,6 +177,9 @@ func encode[E any](w io.Writer, maxEntries int, entries []E) error {
 
 // LoadFromFile loads cache data from the given filePath.
 //
+// The loaded cache has the maxEntries of the saved cache and no weight bound,
+// even if the saved cache was made by [NewWeighted].
+//
 // Returns an error if the file does not exist or is corrupted.
 //
 // See [Cache.SaveToFile] for saving cache data to file.
@@ -223,6 +226,9 @@ func LoadFromFileOrNew[K comparable, V any](filePath string, maxEntries int) (*C
 
 // LoadFrom loads cache data from the given reader. When it succeeds, it has
 // read r to the end of the saved data and no further.
+//
+// The loaded cache has the maxEntries of the saved cache and no weight bound,
+// even if the saved cache was made by [NewWeighted].
 //
 // Returns an error if the data is corrupted.
 //
