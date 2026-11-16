@@ -68,6 +68,11 @@ const shardMask = uint64(shardsCount - 1)
 // over the order log.
 const minCompactSlots = 1024
 
+// compactStep is how many slots of a compaction pass each insert scans. It
+// exceeds the one slot that an insert adds, so the pass catches up with the
+// log, and it stays small so that no insert holds orderMu for long.
+const compactStep = 8
+
 // New returns a new cache with the given maxEntries capacity.
 //
 // maxEntries is the maximum number of entries the cache can hold.
@@ -563,20 +568,31 @@ func (c *Cache[K, V]) evictOldestLocked(keep uint64) bool {
 	return false
 }
 
-// dropDeletedLocked removes the slots of deleted entries from the order log
-// once they outnumber live entries by minCompactSlots. Delete leaves its slot
-// behind, so without this pass Set and Delete churn grows the log without
-// bound, and the next eviction has to skip every dead slot. Each pass removes
-// at least as many slots as it keeps, so its cost stays O(1) per Delete.
+// dropDeletedLocked removes the slots of deleted entries from the order log,
+// a few at a time. Delete leaves its slot behind, so without compaction Set
+// and Delete churn grows the log without bound, and the next eviction has to
+// skip every dead slot. A pass starts once dead slots outnumber live entries
+// by minCompactSlots. If it runs to its end, it removes more slots than were
+// live when it began, and the pushes it catches up with add at most
+// 1/(compactStep-1) to the slots it checks. If evictions end it first, they
+// have taken every slot it kept. Either way its cost stays O(1) per Delete or
+// eviction. The pass is spread over the inserts that follow, compactStep
+// slots each, because a shard lock and a table probe per slot would hold up
+// every insert for time in proportion to the cache.
 //
 // Callers must not hold any shard lock.
 func (c *Cache[K, V]) dropDeletedLocked() {
-	live := int(c.entryCount.Load())
-	if c.order.len-live <= live+minCompactSlots {
-		return
+	if c.order.unchecked == 0 {
+		// No pass is running.
+		live := int(c.entryCount.Load())
+		if c.order.len-live <= live+minCompactSlots {
+			return
+		}
+
+		c.order.unchecked = c.order.len
 	}
 
-	c.order.retain(c.slotLive)
+	c.order.compact(c.slotLive, compactStep)
 }
 
 func (c *Cache[K, V]) slotLive(s slot) bool {
@@ -593,10 +609,24 @@ func (c *Cache[K, V]) slotLive(s slot) bool {
 // the oldest slot frees its cell in place. A plain slice would have to move
 // every remaining slot to reuse its front, and an eviction would then cost
 // time in proportion to the cache size.
+//
+// A compaction pass drops dead slots in place, a few per call to compact. From
+// the oldest, the cells in use hold:
+//
+//	len-holes-unchecked  slots already checked and kept, in order
+//	holes                stale copies that are no longer part of the queue
+//	unchecked            slots not yet checked
+//
+// The queue is the kept slots followed by the unchecked ones, and a pass runs
+// while unchecked is above 0. Slots pushed during a pass are unchecked. The
+// counts start from the newest end, so pushFront leaves them alone, and pop
+// changes them only when no kept slot is left; see pop for why that matters.
 type slotRing struct {
-	buf  []slot
-	head int // index in buf of the oldest slot
-	len  int // number of slots in the queue
+	buf       []slot
+	head      int // index in buf of the oldest slot
+	len       int // number of cells in use, holes included
+	holes     int // see above; both are 0 outside a pass
+	unchecked int
 }
 
 // push adds s as the newest slot.
@@ -607,6 +637,10 @@ func (r *slotRing) push(s slot) {
 
 	r.buf[r.index(r.len)] = s
 	r.len++
+
+	if r.unchecked > 0 {
+		r.unchecked++
+	}
 }
 
 // pushFront adds s as the oldest slot. The ring must have a free cell, such as
@@ -617,28 +651,47 @@ func (r *slotRing) pushFront(s slot) {
 	r.len++
 }
 
-// pop removes and returns the oldest slot. The ring must not be empty.
+// pop removes and returns the oldest slot. The ring must not be empty. pop
+// runs on every eviction, so keep it cheap enough to inline.
 func (r *slotRing) pop() slot {
+	if r.len == r.holes+r.unchecked {
+		// No kept slot is left, so the holes come first. Drop them, and
+		// end the pass: every slot left is unchecked, which is where a new
+		// pass would start.
+		r.head = r.index(r.holes)
+		r.len -= r.holes
+		r.holes, r.unchecked = 0, 0
+	}
+
 	s := r.buf[r.head]
-	r.head = r.index(1)
+	r.head++
+	if r.head == len(r.buf) {
+		r.head = 0
+	}
 	r.len--
 
 	return s
 }
 
-// retain removes the slots for which keep returns false and keeps the others
-// in order.
-func (r *slotRing) retain(keep func(slot) bool) {
-	kept := 0
-
-	for i := range r.len {
-		if s := r.buf[r.index(i)]; keep(s) {
-			r.buf[r.index(kept)] = s
-			kept++
+// compact checks up to n slots of the pass and keeps those for which live
+// returns true.
+func (r *slotRing) compact(live func(slot) bool, n int) {
+	for ; n > 0 && r.unchecked > 0; n-- {
+		i := r.len - r.unchecked
+		if s := r.buf[r.index(i)]; live(s) {
+			r.buf[r.index(i-r.holes)] = s
+		} else {
+			r.holes++
 		}
+
+		r.unchecked--
 	}
 
-	r.len = kept
+	if r.unchecked == 0 {
+		// The pass is over, and the holes are the newest cells.
+		r.len -= r.holes
+		r.holes = 0
+	}
 }
 
 // index returns the position in buf of the i-th oldest slot.
