@@ -16,7 +16,7 @@ A fast, generic, thread-safe cache for Go.
 * **Weighted capacity**: `NewWeighted` also bounds the total weight of the entries, such as the bytes of their values.
 * **Iterators**: Go 1.23+ range-over-func support with `All()`, `Keys()`, `Values()`, and their eviction-order twins `AllFIFO()`, `KeysFIFO()`, `ValuesFIFO()`.
 * **Atomic operations**: `GetOrSet`, `GetAndDelete`, `SetIfAbsent` check and update a key in one step, with no locking in your code.
-* **Persistence**: Cache can be saved to file and loaded from file, whole or through functions that select and convert entries (`SaveToFunc`, `LoadFromFunc`).
+* **Persistence**: Cache can be saved to file and loaded from file, whole or through functions that select and convert entries (`SaveToFunc`, `LoadFromFunc`). To restore a cache made by `NewWeighted`, create it again with `NewWeighted` and pass its `Set` to `LoadFromFunc`; `LoadFrom` and `LoadFromFile` drop the weight bound.
 * **Simple API**: See [Go reference](https://pkg.go.dev/go.dw1.io/fastcache).
 
 ## Install

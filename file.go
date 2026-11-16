@@ -177,8 +177,10 @@ func encode[E any](w io.Writer, maxEntries int, entries []E) error {
 
 // LoadFromFile loads cache data from the given filePath.
 //
-// The loaded cache has the maxEntries of the saved cache and no weight bound,
-// even if the saved cache was made by [NewWeighted].
+// To restore a weighted cache, make it with [NewWeighted] and pass its
+// [Cache.Set] to [LoadFromFunc]. LoadFromFile drops the weight bound and keeps
+// only the saved maxEntries, so a cache saved with [math.MaxInt] as maxEntries
+// loads with no bound at all.
 //
 // Returns an error if the file does not exist or is corrupted.
 //
@@ -199,7 +201,9 @@ func LoadFromFile[K comparable, V any](filePath string) (*Cache[K, V], error) {
 // filled with the entries saved in filePath, oldest first. It ignores the
 // capacity of the saved cache: when the file holds more than maxEntries
 // entries, the cache keeps the newest, and its stats count the others as
-// evictions.
+// evictions. The cache is made by [New], so it has no weight bound. To restore
+// a weighted cache, make it with [NewWeighted] and pass its [Cache.Set] to
+// [LoadFromFunc].
 //
 // If the file does not exist or cannot be loaded, the cache is returned empty.
 // LoadFromFileOrNew returns an error only if maxEntries is not positive.
@@ -227,8 +231,10 @@ func LoadFromFileOrNew[K comparable, V any](filePath string, maxEntries int) (*C
 // LoadFrom loads cache data from the given reader. When it succeeds, it has
 // read r to the end of the saved data and no further.
 //
-// The loaded cache has the maxEntries of the saved cache and no weight bound,
-// even if the saved cache was made by [NewWeighted].
+// To restore a weighted cache, make it with [NewWeighted] and pass its
+// [Cache.Set] to [LoadFromFunc]. LoadFrom drops the weight bound and keeps
+// only the saved maxEntries, so a cache saved with [math.MaxInt] as maxEntries
+// loads with no bound at all.
 //
 // Returns an error if the data is corrupted.
 //
