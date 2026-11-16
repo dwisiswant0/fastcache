@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"runtime"
 	"slices"
 	"sync"
@@ -1257,6 +1258,16 @@ func TestSlotRingKeepsFIFOOrder(t *testing.T) {
 			want = want[1:]
 		}
 
+		// Eviction that keeps the oldest slot pops it, pops the next one,
+		// and puts the first back in front.
+		if len(want) > 1 {
+			kept := ring.pop()
+			ring.pop()
+			ring.pushFront(kept)
+
+			want = append(want[:1], want[2:]...)
+		}
+
 		if round%11 == 0 {
 			ring.retain(keep)
 
@@ -1733,4 +1744,563 @@ func readVersions(t *testing.T, c *Cache[string, [2]int], names []string, seen [
 	}
 
 	return true
+}
+
+func weighLen(_ string, v []byte) int { return len(v) }
+
+// newWeightedCache returns a cache of at most 100 entries whose values add up
+// to at most 100 bytes.
+func newWeightedCache(t *testing.T) *Cache[string, []byte] {
+	t.Helper()
+
+	c, err := NewWeighted[string, []byte](100, 100, weighLen)
+	if err != nil {
+		t.Fatalf("NewWeighted error: %s", err)
+	}
+
+	t.Cleanup(c.Reset)
+
+	return c
+}
+
+// setLen stores a value of n bytes under k.
+func setLen(t *testing.T, c *Cache[string, []byte], k string, n int) {
+	t.Helper()
+
+	if err := c.Set(k, make([]byte, n)); err != nil {
+		t.Fatalf("Set(%q, %d bytes) error: %s", k, n, err)
+	}
+}
+
+// checkWeighted checks that c holds wantKeys, oldest first, whose values add
+// up to wantWeight bytes, that c counts the same weight, and that c has
+// evicted wantEvictions entries.
+func checkWeighted(t *testing.T, c *Cache[string, []byte], wantKeys []string, wantWeight int, wantEvictions uint64) {
+	t.Helper()
+
+	keys := slices.Collect(c.KeysFIFO())
+
+	stored := 0
+	for v := range c.Values() {
+		stored += len(v)
+	}
+
+	var stats Stats
+
+	c.UpdateStats(&stats)
+
+	if !slices.Equal(keys, wantKeys) || stored != wantWeight || c.weight.Load() != int64(wantWeight) ||
+		stats.Evictions != wantEvictions {
+		t.Fatalf("got keys %q holding %d bytes, counted weight %d, %d evictions; want keys %q holding %d bytes, %d evictions",
+			keys, stored, c.weight.Load(), stats.Evictions, wantKeys, wantWeight, wantEvictions)
+	}
+}
+
+// TestNewWeightedKeepsTotalWeightWithinMax reproduces issue #70. Values of
+// 1 KiB, with every 100th one 1 MiB, fill a cache whose entry count would
+// hold all of them, so only the weight bound can keep their total in check.
+// The cache must evict the oldest entries until the newest ones fit.
+func TestNewWeightedKeepsTotalWeightWithinMax(t *testing.T) {
+	t.Parallel()
+
+	const maxWeight = 2 << 20
+
+	c, err := NewWeighted[string, []byte](1000, maxWeight, weighLen)
+	if err != nil {
+		t.Fatalf("NewWeighted error: %s", err)
+	}
+	defer c.Reset()
+
+	for i := range 1000 {
+		v := make([]byte, 1<<10)
+		if i%100 == 0 {
+			v = make([]byte, 1<<20)
+		}
+
+		if err := c.Set(fmt.Sprintf("k%d", i), v); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
+	}
+
+	// From the newest back, k999 to k801 add up to 1 MiB and 198 KiB. k800
+	// would add another 1 MiB, which is more than maxWeight.
+	want := make([]string, 0, 199)
+	for i := 801; i < 1000; i++ {
+		want = append(want, fmt.Sprintf("k%d", i))
+	}
+
+	checkWeighted(t, c, want, 1<<20+198<<10, 801)
+}
+
+// TestNewWeightedSetHeavierValue checks that a Set that makes a value heavier
+// evicts the oldest other entries until it fits, and that the key keeps its
+// place even when it is the oldest.
+func TestNewWeightedSetHeavierValue(t *testing.T) {
+	t.Parallel()
+
+	type set struct {
+		key  string
+		size int
+	}
+
+	tests := []struct {
+		name          string
+		sets          []set
+		wantKeys      []string
+		wantWeight    int
+		wantEvictions uint64
+	}{
+		{
+			name:          "fits",
+			sets:          []set{{"A", 10}, {"B", 10}},
+			wantKeys:      []string{"A", "B"},
+			wantWeight:    60,
+			wantEvictions: 0,
+		},
+		{
+			name:          "evicts an older key",
+			sets:          []set{{"X", 30}, {"A", 30}, {"B", 30}},
+			wantKeys:      []string{"A", "B"},
+			wantWeight:    80,
+			wantEvictions: 1,
+		},
+		{
+			name:          "keeps the oldest key in place",
+			sets:          []set{{"A", 30}, {"B", 30}, {"C", 30}},
+			wantKeys:      []string{"A", "C"},
+			wantWeight:    80,
+			wantEvictions: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := newWeightedCache(t)
+			for _, s := range tt.sets {
+				setLen(t, c, s.key, s.size)
+			}
+
+			setLen(t, c, "A", 50)
+
+			checkWeighted(t, c, tt.wantKeys, tt.wantWeight, tt.wantEvictions)
+
+			if v, ok := c.Get("A"); !ok || len(v) != 50 {
+				t.Fatalf("Get(%q) returned %d bytes, %t; want 50 bytes, true", "A", len(v), ok)
+			}
+		})
+	}
+}
+
+// TestGetFindsKeyWhileSetMakesItHeavier checks that a Set that needs room for
+// a heavier value never takes its key out of the cache, even when the key is
+// the oldest entry. A Get that races with the Set must return the old or the
+// new value.
+func TestGetFindsKeyWhileSetMakesItHeavier(t *testing.T) {
+	t.Parallel()
+
+	c := newWeightedCache(t)
+
+	// A stays the oldest entry: every Set of it below is an update.
+	setLen(t, c, "A", 50)
+	setLen(t, c, "B", 10)
+
+	var (
+		reading sync.WaitGroup
+		stop    atomic.Bool
+		misses  atomic.Int64
+	)
+
+	reading.Go(func() {
+		for !stop.Load() {
+			if !c.Has("A") {
+				misses.Add(1)
+			}
+		}
+	})
+
+	for range 10_000 {
+		setLen(t, c, "A", 95) // makes room by evicting B
+		setLen(t, c, "A", 50)
+		setLen(t, c, "B", 10)
+	}
+
+	stop.Store(true)
+	reading.Wait()
+
+	if n := misses.Load(); n != 0 {
+		t.Fatalf("Get missed a key that was never deleted %d times", n)
+	}
+}
+
+// TestNewWeightedSetLighterValue checks that a cache holds entries up to
+// exactly maxWeight, and that making a value lighter frees weight for others.
+func TestNewWeightedSetLighterValue(t *testing.T) {
+	t.Parallel()
+
+	c := newWeightedCache(t)
+
+	setLen(t, c, "A", 40)
+	setLen(t, c, "B", 60)
+	checkWeighted(t, c, []string{"A", "B"}, 100, 0)
+
+	setLen(t, c, "B", 10)
+	checkWeighted(t, c, []string{"A", "B"}, 50, 0)
+
+	setLen(t, c, "C", 50)
+	checkWeighted(t, c, []string{"A", "B", "C"}, 100, 0)
+}
+
+// TestNewWeightedRejectsTooHeavyValue checks that a value heavier than
+// maxWeight is rejected and leaves the cache unchanged.
+func TestNewWeightedRejectsTooHeavyValue(t *testing.T) {
+	t.Parallel()
+
+	c := newWeightedCache(t)
+
+	setLen(t, c, "A", 60)
+	setLen(t, c, "B", 40)
+
+	heavy := make([]byte, 101)
+
+	for _, k := range []string{"A", "C"} {
+		if err := c.Set(k, heavy); !errors.Is(err, ErrInvalidWeight) {
+			t.Fatalf("Set(%q) of %d bytes returned error %v; want %v", k, len(heavy), err, ErrInvalidWeight)
+		}
+	}
+
+	if _, _, err := c.GetOrSet("C", heavy); !errors.Is(err, ErrInvalidWeight) {
+		t.Fatalf("GetOrSet of %d bytes returned error %v; want %v", len(heavy), err, ErrInvalidWeight)
+	}
+
+	if _, err := c.SetIfAbsent("C", heavy); !errors.Is(err, ErrInvalidWeight) {
+		t.Fatalf("SetIfAbsent of %d bytes returned error %v; want %v", len(heavy), err, ErrInvalidWeight)
+	}
+
+	checkWeighted(t, c, []string{"A", "B"}, 100, 0)
+
+	// Stats count every Set call, including the rejected ones.
+	var stats Stats
+
+	c.UpdateStats(&stats)
+
+	if stats.SetCalls != 4 {
+		t.Fatalf("SetCalls is %d; want 4", stats.SetCalls)
+	}
+}
+
+// TestNewWeightedIgnoresWeightOfUnstoredValue checks that GetOrSet and
+// SetIfAbsent, which store nothing for a key that exists, accept a value of
+// any weight for it.
+func TestNewWeightedIgnoresWeightOfUnstoredValue(t *testing.T) {
+	t.Parallel()
+
+	c := newWeightedCache(t)
+
+	setLen(t, c, "A", 60)
+
+	heavy := make([]byte, 101)
+
+	if v, loaded, err := c.GetOrSet("A", heavy); err != nil || !loaded || len(v) != 60 {
+		t.Fatalf("GetOrSet of an existing key returned %d bytes, %t, %v; want 60 bytes, true, nil", len(v), loaded, err)
+	}
+
+	if stored, err := c.SetIfAbsent("A", heavy); err != nil || stored {
+		t.Fatalf("SetIfAbsent of an existing key returned %t, %v; want false, nil", stored, err)
+	}
+
+	checkWeighted(t, c, []string{"A"}, 60, 0)
+}
+
+func TestNewWeightedRejectsNegativeWeight(t *testing.T) {
+	t.Parallel()
+
+	c, err := NewWeighted[string, int](10, 100, func(_ string, v int) int { return v })
+	if err != nil {
+		t.Fatalf("NewWeighted error: %s", err)
+	}
+	defer c.Reset()
+
+	if err := c.Set("k", -1); !errors.Is(err, ErrInvalidWeight) {
+		t.Fatalf("Set of weight -1 returned error %v; want %v", err, ErrInvalidWeight)
+	}
+
+	if c.Len() != 0 || c.weight.Load() != 0 {
+		t.Fatalf("Set of weight -1 left len %d, weight %d; want 0, 0", c.Len(), c.weight.Load())
+	}
+}
+
+// TestNewWeightedRemovalsFreeWeight checks that Delete, GetAndDelete and
+// Reset free the weight of the entries they remove.
+func TestNewWeightedRemovalsFreeWeight(t *testing.T) {
+	t.Parallel()
+
+	c := newWeightedCache(t)
+
+	setLen(t, c, "A", 60)
+	setLen(t, c, "B", 40)
+
+	c.Delete("A")
+	setLen(t, c, "C", 60)
+	checkWeighted(t, c, []string{"B", "C"}, 100, 0)
+
+	c.GetAndDelete("C")
+	setLen(t, c, "D", 60)
+	checkWeighted(t, c, []string{"B", "D"}, 100, 0)
+
+	c.Reset()
+	setLen(t, c, "E", 100)
+	checkWeighted(t, c, []string{"E"}, 100, 0)
+}
+
+// TestNewWeightedBoundsEntryCount checks that maxEntries still bounds a
+// weighted cache, even when its entries weigh nothing.
+func TestNewWeightedBoundsEntryCount(t *testing.T) {
+	t.Parallel()
+
+	c, err := NewWeighted[string, []byte](2, 100, weighLen)
+	if err != nil {
+		t.Fatalf("NewWeighted error: %s", err)
+	}
+	defer c.Reset()
+
+	for _, k := range []string{"a", "b", "c"} {
+		setLen(t, c, k, 0)
+	}
+
+	checkWeighted(t, c, []string{"b", "c"}, 0, 1)
+}
+
+func TestNewWeightedReturnsErrorForInvalidArguments(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		maxEntries int
+		maxWeight  int
+		weigh      func(string, []byte) int
+		want       error
+	}{
+		{"maxEntries 0", 0, 1, weighLen, ErrInvalidMaxEntries},
+		{"maxWeight 0", 1, 0, weighLen, ErrInvalidMaxWeight},
+		{"maxWeight -1", 1, -1, weighLen, ErrInvalidMaxWeight},
+		{"nil weigh", 1, 1, nil, errNilWeigh},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, err := NewWeighted(tt.maxEntries, tt.maxWeight, tt.weigh)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("NewWeighted returned error %v; want %v", err, tt.want)
+			}
+
+			if c != nil {
+				t.Fatal("NewWeighted returned a cache with an error")
+			}
+		})
+	}
+}
+
+// TestNewWeightedWithoutEntryBound checks that a cache bounded only by weight,
+// through a maxEntries of math.MaxInt, still bounds the weight.
+func TestNewWeightedWithoutEntryBound(t *testing.T) {
+	t.Parallel()
+
+	c, err := NewWeighted[string, []byte](math.MaxInt, 100, weighLen)
+	if err != nil {
+		t.Fatalf("NewWeighted error: %s", err)
+	}
+	defer c.Reset()
+
+	for _, k := range []string{"a", "b", "c"} {
+		setLen(t, c, k, 40)
+	}
+
+	checkWeighted(t, c, []string{"b", "c"}, 80, 1)
+}
+
+// TestNewWeightedConcurrentWritesKeepWeightWithinMax runs sets and deletes of
+// random weights from several goroutines. The counted weight must stay
+// between 0 and maxWeight throughout, and once the writers stop it must equal
+// the weight of the stored values.
+func TestNewWeightedConcurrentWritesKeepWeightWithinMax(t *testing.T) {
+	t.Parallel()
+
+	const (
+		maxWeight = 10_000
+		keys      = 512
+		writers   = 8
+		ops       = 20_000
+	)
+
+	c, err := NewWeighted[int, []byte](keys, maxWeight, func(_ int, v []byte) int { return len(v) })
+	if err != nil {
+		t.Fatalf("NewWeighted error: %s", err)
+	}
+	defer c.Reset()
+
+	var (
+		writing, sampling sync.WaitGroup
+		stop              atomic.Bool
+		outOfRange        atomic.Int64
+	)
+
+	sampling.Go(func() {
+		for !stop.Load() {
+			if w := c.weight.Load(); w < 0 || w > maxWeight {
+				outOfRange.CompareAndSwap(0, w)
+			}
+		}
+	})
+
+	for w := range uint64(writers) {
+		writing.Go(func() {
+			if err := writeRandomly(c, w, keys, ops); err != nil {
+				t.Errorf("write error: %s", err)
+			}
+		})
+	}
+
+	writing.Wait()
+	stop.Store(true)
+	sampling.Wait()
+
+	if w := outOfRange.Load(); w != 0 {
+		t.Fatalf("counted weight reached %d; want between 0 and %d", w, maxWeight)
+	}
+
+	stored := 0
+	for v := range c.Values() {
+		stored += len(v)
+	}
+
+	if got := c.weight.Load(); got != int64(stored) {
+		t.Fatalf("counted weight %d; the stored values weigh %d", got, stored)
+	}
+}
+
+// writeRandomly runs ops sets and deletes of keys below keys, with values of
+// up to 999 bytes, and the occasional Reset. It returns the first error.
+func writeRandomly(c *Cache[int, []byte], seed uint64, keys, ops int) error {
+	rng := rand.New(rand.NewPCG(seed, 0)) //nolint:gosec // Varied writes need no secure randomness.
+
+	for range ops {
+		if rng.IntN(1000) == 0 {
+			c.Reset()
+
+			continue
+		}
+
+		k := rng.IntN(keys)
+		v := make([]byte, rng.IntN(1000))
+
+		var err error
+
+		switch rng.IntN(5) {
+		case 0:
+			err = c.Set(k, v)
+		case 1:
+			_, _, err = c.GetOrSet(k, v)
+		case 2:
+			_, err = c.SetIfAbsent(k, v)
+		case 3:
+			c.Delete(k)
+		default:
+			c.GetAndDelete(k)
+		}
+
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// TestSetSkipsOrderLockWithoutAddingWeight checks that a Set of an existing
+// key does not wait for the order lock, which every insert holds, unless the
+// new value weighs more than the old one. Entries of caches made by New weigh
+// nothing, so updates there never wait for inserts.
+func TestSetSkipsOrderLockWithoutAddingWeight(t *testing.T) {
+	t.Parallel()
+
+	plain, err := New[string, []byte](10)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer plain.Reset()
+
+	weighted := newWeightedCache(t)
+
+	setLen(t, plain, "k", 10)
+	setLen(t, weighted, "k", 10)
+
+	plain.orderMu.Lock()
+	defer plain.orderMu.Unlock()
+
+	weighted.orderMu.Lock()
+	defer weighted.orderMu.Unlock()
+
+	updates := []struct {
+		name string
+		c    *Cache[string, []byte]
+		size int
+	}{
+		{"New, more bytes", plain, 50},
+		{"NewWeighted, same weight", weighted, 10},
+		{"NewWeighted, less weight", weighted, 5},
+	}
+
+	for _, u := range updates {
+		select {
+		case err := <-setInBackground(u.c, "k", u.size):
+			if err != nil {
+				t.Fatalf("%s: Set error: %s", u.name, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s: Set waited for the order lock", u.name)
+		}
+	}
+}
+
+// TestSetOfHeavierValueWaitsForOrderLock checks that a Set that makes a value
+// heavier takes the order lock, since it may have to evict to make room.
+func TestSetOfHeavierValueWaitsForOrderLock(t *testing.T) {
+	t.Parallel()
+
+	c := newWeightedCache(t)
+
+	setLen(t, c, "k", 10)
+
+	c.orderMu.Lock()
+
+	done := setInBackground(c, "k", 50)
+
+	select {
+	case err := <-done:
+		c.orderMu.Unlock()
+		t.Fatalf("Set of a heavier value returned %v without waiting for the order lock", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	c.orderMu.Unlock()
+
+	if err := <-done; err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	checkWeighted(t, c, []string{"k"}, 50, 0)
+}
+
+// setInBackground stores a value of n bytes under k in a new goroutine, and
+// returns a channel that receives the error of the Set.
+func setInBackground(c *Cache[string, []byte], k string, n int) <-chan error {
+	done := make(chan error, 1)
+
+	go func() { done <- c.Set(k, make([]byte, n)) }()
+
+	return done
 }

@@ -21,15 +21,22 @@
 // A single FIFO queue shared by all shards tracks insertion order, so the
 // capacity limit and eviction order apply to the whole cache. Adding a new key
 // also locks this queue, so new keys are inserted one at a time across the
-// whole cache. Updates of existing keys and deletes lock only the key's shard.
+// whole cache. In a cache made by [NewWeighted], an update that makes a value
+// heavier locks the queue too, since it may have to evict entries. Other
+// updates of existing keys and deletes lock only the key's shard.
 //
 // Keys are distributed across shards using rapidhash-based shard hashing.
 //
 // # Eviction
 //
+// A cache made by [New] holds at most maxEntries entries. A cache made by
+// [NewWeighted] also bounds the total weight of its entries. A function that
+// the caller supplies weighs each entry, for example by the length of its
+// value.
+//
 // When the cache reaches capacity, the oldest entries are evicted first
 // (FIFO - First In, First Out). There is no time-based expiration; entries
-// are only evicted when space is needed for new entries.
+// are only evicted when space is needed for new entries or heavier values.
 //
 // # Iteration
 //
@@ -67,7 +74,8 @@
 // [Cache.Get] and [Cache.Has] lock nothing unless a miss overlaps a delete in
 // the same shard, and a Get that races with a write to the same key returns
 // the value from before or after it. Other operations
-// lock the key's shard, and adding a key also locks the FIFO queue. Iterator
+// lock the key's shard, and adding a key, or making a value heavier in a
+// cache made by [NewWeighted], also locks the FIFO queue. Iterator
 // methods copy one shard at a time while holding its lock, then yield entries
 // from the copy, and the FIFO iterators copy every shard before they yield
 // any. Writes to a shard wait only during its copy, and the entries

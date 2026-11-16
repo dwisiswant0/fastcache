@@ -13,6 +13,7 @@ A fast, generic, thread-safe cache for Go.
 * **Zero allocations**: No allocations on `Get` ops.
 * **Thread-safe**: Concurrent goroutines may read and write into a single cache instance.
 * **FIFO eviction**: Oldest entries are evicted first when the cache is full.
+* **Weighted capacity**: `NewWeighted` also bounds the total weight of the entries, such as the bytes of their values.
 * **Iterators**: Go 1.23+ range-over-func support with `All()`, `Keys()`, `Values()`, and their eviction-order twins `AllFIFO()`, `KeysFIFO()`, `ValuesFIFO()`.
 * **Atomic operations**: `GetOrSet`, `GetAndDelete`, `SetIfAbsent` check and update a key in one step, with no locking in your code.
 * **Persistence**: Cache can be saved to file and loaded from file, whole or through functions that select and convert entries (`SaveToFunc`, `LoadFromFunc`).
@@ -127,14 +128,14 @@ The cache uses a sharded design for concurrent scalability:
 * **512 shards**: Writers lock only the shard of their key, reducing contention on multi-core CPUs.
 * **Open-addressing hash table per shard**: Entries are stored by the rapidhash value of their key, for O(1) lookups.
 * **`Get` without locking**: Readers probe the table with atomic loads, so reading one key scales with the number of CPUs. A miss that overlaps a delete in the same shard probes again under the shard's lock. Hit and miss counts are striped per CPU.
-* **Cache-wide FIFO queue**: One queue tracks insertion order across all shards, so the oldest entry in the cache is evicted first. Adding a new key also locks this queue.
+* **Cache-wide FIFO queue**: One queue tracks insertion order across all shards, so the oldest entry in the cache is evicted first. Adding a new key also locks this queue, as does making a value heavier in a cache made by `NewWeighted`.
 
 ## Differences from Original
 
 | Aspect | Original fastcache | This fork |
 |--------|-------------------|-----------|
 | **API** | `[]byte` keys/values | Generic `[K, V]` |
-| **Capacity** | Bytes-based | Entry-count based |
+| **Capacity** | Bytes-based | Entry count, plus total weight with `NewWeighted` |
 | **Storage** | Ring buffer of bytes | Open-addressing hash table per shard |
 | **Eviction** | FIFO (by byte position) | FIFO (by insertion order) |
 | **Allocations** | 1 alloc/Get | Zero |
@@ -153,65 +154,65 @@ Compared against the original [VictoriaMetrics/fastcache](https://github.com/Vic
   cpu: Apple M5 Pro
                      │ fastcache_fork │                fastcache                │                  otter                  │
                      │     sec/op     │    sec/op      vs base                  │    sec/op      vs base                  │
-  Set/1-4               29.12n ±   4%    23.98n ±  1%    -17.65% (p=0.000 n=10)   287.65n ±  2%   +887.81% (p=0.000 n=10)
-  Get/1-4               12.27n ±   0%    25.76n ±  1%   +109.86% (p=0.000 n=10)    20.71n ±  3%    +68.72% (p=0.000 n=10)
-  SetGet/1-4            42.56n ±   7%    59.37n ±  2%    +39.49% (p=0.000 n=10)   324.75n ±  2%   +663.04% (p=0.000 n=10)
-  GetParallel/1-4       6.878n ±  33%   71.425n ±  1%   +938.46% (p=0.000 n=10)    5.880n ±  3%    -14.52% (p=0.023 n=10)
-  SetParallel/1-4       137.9n ±   3%    218.2n ±  1%    +58.25% (p=0.000 n=10)    376.9n ±  2%   +173.38% (p=0.000 n=10)
-  Set/16-4              30.03n ±  82%    25.92n ±  4%    -13.69% (p=0.001 n=10)   279.60n ±  3%   +831.22% (p=0.000 n=10)
-  Get/16-4              12.44n ±   0%    30.41n ±  0%   +144.45% (p=0.000 n=10)    21.21n ±  1%    +70.54% (p=0.000 n=10)
-  SetGet/16-4           42.04n ±   4%    60.61n ±  1%    +44.19% (p=0.000 n=10)   330.10n ±  1%   +685.30% (p=0.000 n=10)
-  GetParallel/16-4      5.034n ±  41%   79.715n ± 21%  +1483.69% (p=0.000 n=10)    5.476n ±  5%          ~ (p=0.247 n=10)
-  SetParallel/16-4      151.9n ±   1%    218.9n ± 21%    +44.06% (p=0.002 n=10)    383.2n ±  1%   +152.19% (p=0.000 n=10)
-  Set/32-4              31.86n ±   4%    32.16n ±  1%          ~ (p=0.066 n=10)   285.15n ±  1%   +794.87% (p=0.000 n=10)
-  Get/32-4              14.58n ±   2%    36.58n ±  1%   +150.89% (p=0.000 n=10)    22.72n ± 26%    +55.83% (p=0.000 n=10)
-  SetGet/32-4           45.53n ±   5%    70.96n ±  0%    +55.87% (p=0.000 n=10)   332.55n ±  1%   +630.48% (p=0.000 n=10)
-  GetParallel/32-4      7.906n ±   1%   49.145n ±  0%   +521.62% (p=0.000 n=10)    5.745n ±  6%    -27.33% (p=0.001 n=10)
-  SetParallel/32-4      107.2n ±   3%    138.2n ±  8%    +28.90% (p=0.000 n=10)    267.6n ±  3%   +149.51% (p=0.000 n=10)
-  Set/128-4             34.64n ±   6%    43.18n ±  1%    +24.65% (p=0.000 n=10)   288.45n ±  1%   +732.71% (p=0.000 n=10)
-  Get/128-4             18.39n ±   2%    57.26n ±  2%   +211.42% (p=0.000 n=10)    27.02n ± 14%    +46.97% (p=0.000 n=10)
-  SetGet/128-4          52.31n ±   6%    99.08n ±  1%    +89.40% (p=0.002 n=10)   335.00n ±  0%   +540.41% (p=0.002 n=10)
-  GetParallel/128-4     9.747n ± 228%   46.170n ±  2%   +373.68% (p=0.001 n=10)    6.673n ±  4%    -31.53% (p=0.000 n=10)
-  SetParallel/128-4     29.92n ±  18%    45.63n ± 35%    +52.51% (p=0.003 n=10)   251.75n ±  7%   +741.41% (p=0.000 n=10)
-  Set/256-4             39.61n ±   5%    58.98n ±  1%    +48.91% (p=0.000 n=10)   284.90n ±  0%   +619.35% (p=0.000 n=10)
-  Get/256-4             24.49n ±   7%    79.27n ±  2%   +223.66% (p=0.000 n=10)    30.39n ±  1%    +24.09% (p=0.000 n=10)
-  SetGet/256-4          64.32n ±   3%   142.80n ±  2%   +122.01% (p=0.000 n=10)   335.15n ±  2%   +421.07% (p=0.000 n=10)
-  GetParallel/256-4     9.661n ±   5%   56.825n ±  2%   +488.19% (p=0.000 n=10)    7.787n ±  6%    -19.39% (p=0.000 n=10)
-  SetParallel/256-4     19.07n ±  31%    28.66n ± 20%    +50.29% (p=0.000 n=10)   254.65n ±  4%  +1235.34% (p=0.000 n=10)
-  Set/512-4             56.61n ± 132%    88.84n ±  0%    +56.93% (p=0.023 n=10)   282.95n ±  1%   +399.82% (p=0.000 n=10)
-  Get/512-4             37.16n ±   3%   119.95n ±  1%   +222.84% (p=0.000 n=10)    40.49n ±  2%     +8.96% (p=0.000 n=10)
-  SetGet/512-4          91.97n ±   4%   207.90n ±  1%   +126.05% (p=0.000 n=10)   340.60n ±  2%   +270.34% (p=0.000 n=10)
-  GetParallel/512-4    13.540n ±  10%   87.230n ±  2%   +544.24% (p=0.000 n=10)    9.807n ±  2%    -27.57% (p=0.000 n=10)
-  SetParallel/512-4     20.90n ±  20%    22.66n ± 21%     +8.40% (p=0.001 n=10)   261.60n ±  3%  +1151.67% (p=0.000 n=10)
-  Set/1024-4            79.09n ±   2%   139.00n ±  0%    +75.75% (p=0.000 n=10)   297.25n ±  1%   +275.84% (p=0.000 n=10)
-  Get/1024-4            59.91n ±   1%   180.55n ±  1%   +201.39% (p=0.000 n=10)    58.01n ±  2%     -3.16% (p=0.000 n=10)
-  SetGet/1024-4         140.5n ±   1%    322.2n ±  1%   +129.44% (p=0.000 n=10)    355.1n ±  1%   +152.79% (p=0.000 n=10)
-  GetParallel/1024-4    18.04n ±  11%   117.00n ±  3%   +548.38% (p=0.000 n=10)    14.56n ±  1%    -19.31% (p=0.000 n=10)
-  SetParallel/1024-4    27.99n ± 360%    38.41n ±  5%          ~ (p=0.481 n=10)   259.65n ±  4%   +827.65% (p=0.001 n=10)
-  Set/2048-4            128.3n ±   1%    235.4n ±  1%    +83.52% (p=0.000 n=10)    310.6n ±  1%   +142.09% (p=0.000 n=10)
-  Get/2048-4            107.2n ±  12%    336.8n ± 44%   +213.99% (p=0.000 n=10)    103.6n ±  3%     -3.36% (p=0.001 n=10)
-  SetGet/2048-4         236.4n ±   1%    601.0n ±  6%   +154.23% (p=0.000 n=10)    375.0n ±  1%    +58.63% (p=0.000 n=10)
-  GetParallel/2048-4    36.69n ±   9%   199.80n ±  3%   +444.56% (p=0.000 n=10)    28.80n ±  3%    -21.49% (p=0.001 n=10)
-  SetParallel/2048-4    41.25n ±  15%    77.94n ±  8%    +88.96% (p=0.000 n=10)   184.55n ±  6%   +347.39% (p=0.000 n=10)
-  Set/4096-4            223.0n ±   1%    452.2n ±  0%   +102.80% (p=0.000 n=10)    377.1n ±  0%    +69.08% (p=0.000 n=10)
-  Get/4096-4            204.3n ±   1%    602.9n ±  2%   +195.11% (p=0.000 n=10)    172.3n ±  0%    -15.66% (p=0.000 n=10)
-  SetGet/4096-4         415.0n ±   0%   1137.5n ±  1%   +174.06% (p=0.000 n=10)    479.2n ±  1%    +15.47% (p=0.000 n=10)
-  GetParallel/4096-4    65.54n ±  21%   418.85n ± 10%   +539.12% (p=0.000 n=10)    57.16n ±  3%    -12.78% (p=0.001 n=10)
-  SetParallel/4096-4    87.06n ±  12%   173.80n ±  7%    +99.64% (p=0.000 n=10)   204.50n ±  1%   +134.91% (p=0.000 n=10)
-  Set/8192-4            404.5n ±   2%    876.0n ±  0%   +116.52% (p=0.000 n=10)    527.7n ±  1%    +30.43% (p=0.000 n=10)
-  Get/8192-4            392.2n ±   4%   1396.0n ±  4%   +255.94% (p=0.000 n=10)    300.4n ±  1%    -23.39% (p=0.000 n=10)
-  SetGet/8192-4         779.5n ±   0%   2375.0n ±  7%   +204.68% (p=0.000 n=10)    680.5n ±  1%    -12.69% (p=0.002 n=10)
-  GetParallel/8192-4   123.65n ±  49%   644.10n ±  6%   +420.91% (p=0.000 n=10)    98.73n ±  3%    -20.15% (p=0.000 n=10)
-  SetParallel/8192-4    132.5n ±  20%    298.0n ±  7%   +124.87% (p=0.000 n=10)    237.7n ±  1%    +79.36% (p=0.000 n=10)
-  geomean               49.74n           122.2n         +145.65%                   116.4n         +134.08%
+  Set/1-4                29.65n ± 13%    24.25n ±  9%    -18.20% (p=0.000 n=10)   291.25n ±  1%   +882.29% (p=0.000 n=10)
+  Get/1-4                12.21n ±  2%    25.73n ±  2%   +110.73% (p=0.000 n=10)    20.49n ±  0%    +67.81% (p=0.000 n=10)
+  SetGet/1-4             42.88n ±  5%    56.49n ±  6%    +31.72% (p=0.000 n=10)   336.80n ±  1%   +685.36% (p=0.000 n=10)
+  GetParallel/1-4        6.983n ±  1%   70.680n ±  1%   +912.17% (p=0.000 n=10)    5.274n ±  1%    -24.48% (p=0.000 n=10)
+  SetParallel/1-4        145.4n ±  2%    228.3n ± 17%    +57.05% (p=0.000 n=10)    378.5n ±  1%   +160.32% (p=0.000 n=10)
+  Set/16-4               30.25n ±  6%    26.11n ±  2%    -13.66% (p=0.000 n=10)   289.05n ±  1%   +855.70% (p=0.000 n=10)
+  Get/16-4               12.46n ±  1%    30.17n ±  1%   +142.13% (p=0.000 n=10)    21.14n ±  5%    +69.66% (p=0.000 n=10)
+  SetGet/16-4            42.83n ±  5%    58.95n ±  4%    +37.65% (p=0.000 n=10)   335.70n ±  2%   +683.80% (p=0.000 n=10)
+  GetParallel/16-4       7.048n ± 34%   78.370n ±  0%  +1011.87% (p=0.000 n=10)    5.202n ±  0%    -26.19% (p=0.022 n=10)
+  SetParallel/16-4       158.8n ±  4%    258.1n ± 16%    +62.58% (p=0.000 n=10)    383.3n ±  1%   +141.48% (p=0.000 n=10)
+  Set/32-4               33.32n ± 12%    31.92n ±  2%          ~ (p=0.143 n=10)   289.80n ±  1%   +769.88% (p=0.000 n=10)
+  Get/32-4               14.59n ±  0%    36.17n ±  0%   +147.99% (p=0.000 n=10)    21.67n ±  1%    +48.54% (p=0.000 n=10)
+  SetGet/32-4            46.46n ±  4%    70.96n ±  2%    +52.72% (p=0.000 n=10)   336.15n ±  1%   +623.45% (p=0.000 n=10)
+  GetParallel/32-4       7.839n ± 34%   48.940n ±  0%   +524.35% (p=0.000 n=10)    5.414n ±  7%    -30.93% (p=0.023 n=10)
+  SetParallel/32-4       109.8n ±  2%    146.4n ±  4%    +33.23% (p=0.000 n=10)    267.2n ±  1%   +143.29% (p=0.000 n=10)
+  Set/128-4              35.80n ±  7%    42.03n ±  1%    +17.37% (p=0.000 n=10)   290.60n ±  1%   +711.62% (p=0.000 n=10)
+  Get/128-4              18.18n ±  1%    55.64n ±  1%   +206.11% (p=0.000 n=10)    26.47n ±  1%    +45.64% (p=0.000 n=10)
+  SetGet/128-4           52.43n ±  6%    96.25n ±  1%    +83.57% (p=0.000 n=10)   339.35n ±  1%   +547.24% (p=0.000 n=10)
+  GetParallel/128-4      6.643n ± 33%   44.620n ±  0%   +571.68% (p=0.000 n=10)    6.649n ± 12%          ~ (p=0.684 n=10)
+  SetParallel/128-4      28.45n ± 11%    27.21n ± 73%          ~ (p=0.971 n=10)   239.80n ± 17%   +743.03% (p=0.000 n=10)
+  Set/256-4              40.55n ±  1%    59.01n ±  1%    +45.54% (p=0.000 n=10)   290.10n ±  1%   +615.50% (p=0.000 n=10)
+  Get/256-4              24.33n ±  1%    78.83n ±  1%   +224.00% (p=0.000 n=10)    30.38n ±  4%    +24.87% (p=0.000 n=10)
+  SetGet/256-4           66.20n ±  5%   139.25n ±  0%   +110.35% (p=0.000 n=10)   341.05n ±  1%   +415.18% (p=0.000 n=10)
+  GetParallel/256-4      9.428n ±  1%   58.035n ±  1%   +515.53% (p=0.000 n=10)    7.609n ±  1%    -19.29% (p=0.002 n=10)
+  SetParallel/256-4      14.93n ± 34%    27.95n ± 26%    +87.24% (p=0.000 n=10)   254.90n ±  3%  +1607.87% (p=0.000 n=10)
+  Set/512-4              53.08n ±  5%    88.25n ±  1%    +66.26% (p=0.000 n=10)   288.75n ±  1%   +443.99% (p=0.000 n=10)
+  Get/512-4              36.19n ±  2%   118.30n ±  1%   +226.93% (p=0.000 n=10)    40.48n ±  2%    +11.86% (p=0.000 n=10)
+  SetGet/512-4           90.88n ±  1%   202.55n ±  0%   +122.88% (p=0.000 n=10)   342.10n ±  2%   +276.43% (p=0.000 n=10)
+  GetParallel/512-4     12.745n ±  1%   84.205n ±  1%   +560.69% (p=0.000 n=10)    9.821n ±  1%    -22.94% (p=0.000 n=10)
+  SetParallel/512-4      21.50n ± 23%    22.46n ±  1%     +4.44% (p=0.000 n=10)   265.55n ±  5%  +1134.83% (p=0.000 n=10)
+  Set/1024-4             78.39n ±  5%   138.30n ±  1%    +76.43% (p=0.000 n=10)   295.35n ±  1%   +276.77% (p=0.000 n=10)
+  Get/1024-4             58.87n ±  1%   179.30n ±  1%   +204.57% (p=0.000 n=10)    58.20n ±  0%     -1.14% (p=0.001 n=10)
+  SetGet/1024-4          137.6n ±  1%    319.7n ±  3%   +132.34% (p=0.000 n=10)    353.1n ±  1%   +156.61% (p=0.000 n=10)
+  GetParallel/1024-4     17.38n ±  7%   117.10n ±  1%   +573.96% (p=0.000 n=10)    14.56n ±  3%    -16.20% (p=0.000 n=10)
+  SetParallel/1024-4     24.01n ± 11%    36.70n ±  3%    +52.85% (p=0.000 n=10)   255.90n ±  4%   +965.81% (p=0.000 n=10)
+  Set/2048-4             124.1n ±  2%    231.8n ±  1%    +86.78% (p=0.000 n=10)    314.8n ±  1%   +153.63% (p=0.000 n=10)
+  Get/2048-4             106.2n ±  0%    328.6n ±  6%   +209.37% (p=0.000 n=10)    103.4n ±  3%     -2.68% (p=0.012 n=10)
+  SetGet/2048-4          233.4n ±  1%    574.1n ±  2%   +145.99% (p=0.000 n=10)    366.6n ±  1%    +57.05% (p=0.000 n=10)
+  GetParallel/2048-4     31.09n ±  3%   196.50n ±  3%   +532.04% (p=0.000 n=10)    30.42n ±  4%          ~ (p=0.063 n=10)
+  SetParallel/2048-4     37.56n ±  7%    66.00n ±  7%    +75.74% (p=0.000 n=10)   182.20n ±  2%   +385.16% (p=0.000 n=10)
+  Set/4096-4             223.0n ±  0%    447.0n ±  1%   +100.45% (p=0.000 n=10)    374.0n ±  1%    +67.74% (p=0.000 n=10)
+  Get/4096-4             202.4n ±  0%    590.8n ±  2%   +191.87% (p=0.000 n=10)    172.2n ±  0%    -14.95% (p=0.000 n=10)
+  SetGet/4096-4          409.3n ±  2%   1126.5n ±  1%   +175.23% (p=0.000 n=10)    482.2n ±  1%    +17.80% (p=0.000 n=10)
+  GetParallel/4096-4     63.27n ±  6%   344.25n ±  1%   +444.10% (p=0.000 n=10)    59.99n ±  5%     -5.18% (p=0.015 n=10)
+  SetParallel/4096-4     69.07n ±  5%   126.75n ±  4%    +83.51% (p=0.000 n=10)   201.70n ±  4%   +192.02% (p=0.000 n=10)
+  Set/8192-4             399.1n ±  1%    892.6n ±  1%   +123.65% (p=0.000 n=10)    526.6n ±  2%    +31.93% (p=0.000 n=10)
+  Get/8192-4             384.5n ±  0%   1451.5n ± 24%   +277.50% (p=0.000 n=10)    301.3n ±  1%    -21.63% (p=0.000 n=10)
+  SetGet/8192-4          773.7n ±  0%   2471.5n ± 13%   +219.44% (p=0.000 n=10)    678.8n ±  1%    -12.27% (p=0.000 n=10)
+  GetParallel/8192-4     112.4n ± 15%    632.0n ± 11%   +462.28% (p=0.000 n=10)    101.3n ±  6%     -9.83% (p=0.000 n=10)
+  SetParallel/8192-4     123.6n ±  5%    251.2n ±  5%   +103.36% (p=0.000 n=10)    235.8n ±  5%    +90.81% (p=0.000 n=10)
+  geomean                48.52n          118.4n         +143.94%                   116.2n         +139.50%
 
                      │ fastcache_fork │                 fastcache                 │                 otter                 │
                      │      B/op      │     B/op      vs base                     │     B/op      vs base                 │
-  Set/1-4                64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       65.00 ± 0%  +1.56% (p=0.000 n=10)
+  Set/1-4                64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       65.00 ± 2%  +1.56% (p=0.000 n=10)
   Get/1-4                0.000 ± 0%       8.000 ± 0%           ? (p=0.000 n=10)       0.000 ± 0%       ~ (p=1.000 n=10) ¹
-  SetGet/1-4            64.000 ± 0%       8.000 ± 0%     -87.50% (p=0.000 n=10)      66.000 ± 2%  +3.12% (p=0.000 n=10)
+  SetGet/1-4            64.000 ± 0%       8.000 ± 0%     -87.50% (p=0.000 n=10)      66.000 ± 0%  +3.12% (p=0.000 n=10)
   GetParallel/1-4        0.000 ± 0%       8.000 ± 0%           ? (p=0.000 n=10)       0.000 ± 0%       ~ (p=1.000 n=10) ¹
-  SetParallel/1-4        64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       69.00 ± 1%  +7.81% (p=0.000 n=10)
+  SetParallel/1-4        64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       69.00 ± 0%  +7.81% (p=0.000 n=10)
   Set/16-4               64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       65.00 ± 0%  +1.56% (p=0.000 n=10)
   Get/16-4                0.00 ± 0%       16.00 ± 0%           ? (p=0.000 n=10)        0.00 ± 0%       ~ (p=1.000 n=10) ¹
   SetGet/16-4            64.00 ± 0%       16.00 ± 0%     -75.00% (p=0.000 n=10)       66.00 ± 0%  +3.12% (p=0.000 n=10)
@@ -237,7 +238,7 @@ Compared against the original [VictoriaMetrics/fastcache](https://github.com/Vic
   SetGet/512-4           64.00 ± 0%      512.00 ± 0%    +700.00% (p=0.000 n=10)       66.00 ± 0%  +3.12% (p=0.000 n=10)
   GetParallel/512-4        0.0 ± 0%       490.0 ± 0%           ? (p=0.000 n=10)         0.0 ± 0%       ~ (p=1.000 n=10) ¹
   SetParallel/512-4      64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       64.00 ± 0%       ~ (p=1.000 n=10) ¹
-  Set/1024-4             64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       65.50 ± 1%  +2.34% (p=0.000 n=10)
+  Set/1024-4             64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       65.00 ± 2%  +1.56% (p=0.000 n=10)
   Get/1024-4               0.0 ± 0%       938.0 ± 0%           ? (p=0.000 n=10)         0.0 ± 0%       ~ (p=1.000 n=10) ¹
   SetGet/1024-4          64.00 ± 0%     1024.00 ± 0%   +1500.00% (p=0.000 n=10)       66.00 ± 0%  +3.12% (p=0.000 n=10)
   GetParallel/1024-4       0.0 ± 0%       938.0 ± 0%           ? (p=0.000 n=10)         0.0 ± 0%       ~ (p=1.000 n=10) ¹
@@ -248,16 +249,16 @@ Compared against the original [VictoriaMetrics/fastcache](https://github.com/Vic
   GetParallel/2048-4   0.000Ki ± 0%     1.749Ki ± 0%           ? (p=0.000 n=10)     0.000Ki ± 0%       ~ (p=1.000 n=10) ¹
   SetParallel/2048-4     64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       64.00 ± 0%       ~ (p=1.000 n=10) ¹
   Set/4096-4             64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       66.00 ± 0%  +3.12% (p=0.000 n=10)
-  Get/4096-4           0.000Ki ± 0%     3.247Ki ± 0%           ? (p=0.000 n=10)     0.000Ki ± 0%       ~ (p=1.000 n=10) ¹
-  SetGet/4096-4          64.00 ± 0%     4096.00 ± 0%   +6300.00% (p=0.000 n=10)       67.00 ± 0%  +4.69% (p=0.000 n=10)
-  GetParallel/4096-4   0.000Ki ± 0%     3.243Ki ± 0%           ? (p=0.000 n=10)     0.000Ki ± 0%       ~ (p=1.000 n=10) ¹
+  Get/4096-4           0.000Ki ± 0%     3.246Ki ± 0%           ? (p=0.000 n=10)     0.000Ki ± 0%       ~ (p=1.000 n=10) ¹
+  SetGet/4096-4          64.00 ± 0%     4096.00 ± 0%   +6300.00% (p=0.000 n=10)       66.50 ± 1%  +3.91% (p=0.000 n=10)
+  GetParallel/4096-4   0.000Ki ± 0%     3.244Ki ± 0%           ? (p=0.000 n=10)     0.000Ki ± 0%       ~ (p=1.000 n=10) ¹
   SetParallel/4096-4     64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       64.00 ± 0%       ~ (p=1.000 n=10) ¹
   Set/8192-4             64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       67.00 ± 0%  +4.69% (p=0.000 n=10)
   Get/8192-4           0.000Ki ± 0%     6.479Ki ± 0%           ? (p=0.000 n=10)     0.000Ki ± 0%       ~ (p=1.000 n=10) ¹
   SetGet/8192-4          64.00 ± 0%     8192.00 ± 0%  +12700.00% (p=0.000 n=10)       68.00 ± 1%  +6.25% (p=0.000 n=10)
-  GetParallel/8192-4   0.000Ki ± 0%     6.454Ki ± 0%           ? (p=0.000 n=10)     0.000Ki ± 0%       ~ (p=1.000 n=10) ¹
+  GetParallel/8192-4   0.000Ki ± 0%     6.448Ki ± 0%           ? (p=0.000 n=10)     0.000Ki ± 0%       ~ (p=1.000 n=10) ¹
   SetParallel/8192-4     64.00 ± 0%        0.00 ± 0%    -100.00% (p=0.000 n=10)       64.00 ± 0%       ~ (p=1.000 n=10) ¹
-  geomean                           ²                 ?                         ²                 +1.50%                ²
+  geomean                           ²                 ?                         ²                 +1.46%                ²
   ¹ all samples are equal
   ² summaries must be >0 to compute geomean
 
@@ -321,9 +322,9 @@ Compared against the original [VictoriaMetrics/fastcache](https://github.com/Vic
 
 Highlights:
 
-* **2.3x to 2.5x faster** geomean sec/op than otter and the original fastcache (49.7 ns vs 116.4 ns and 122.2 ns).
+* **2.4x faster** geomean sec/op than otter and the original fastcache (48.5 ns vs 116.2 ns and 118.4 ns).
 * **Zero allocations on `Get`**. A `Set` that replaces a value allocates the new entry (64 B/op here), about what otter allocates on every write; the original fastcache allocates on reads instead.
-* **`GetParallel`** is 5x to 16x faster than the original fastcache. Otter still takes 13% to 32% less time in 9 of 10 `GetParallel` sizes, and 3% to 23% less in `Get` from 1024 keys up.
+* **`GetParallel`** is 5x to 11x faster than the original fastcache. Otter still takes 5% to 31% less time in 8 of 10 `GetParallel` sizes, and 1% to 22% less in `Get` from 1024 keys up.
 * **Writes**: this fork wins every `Set` and `SetParallel` case against otter. Against the original fastcache it wins every `SetGet` case and `Set` from 128 keys up; the original is faster for `Set` on 1 and 16 keys.
 
 Run benchmarks yourself:
@@ -335,7 +336,7 @@ make bench -C benchmarks
 ## Limitations
 
 * No cache expiration: entries are evicted only when the cache is full (FIFO order).
-* No size-based limits: capacity is by entry count, not bytes.
+* No memory accounting: `NewWeighted` bounds the total of the weights that your function returns, not the memory the cache uses.
 
 ## Status
 

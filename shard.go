@@ -53,13 +53,15 @@ type table[K comparable, V any] struct {
 }
 
 // entry is a stored key-value pair. Key and Value are exported for gob
-// serialization; seq is the insertion number shared with the entry's slot and
-// hash is the key's hash. Neither is serialized.
+// serialization; seq is the insertion number shared with the entry's slot,
+// hash is the key's hash, and weight is what the cache's weigh returned for
+// the pair, or 0 in a cache made by New. None of them is serialized.
 type entry[K comparable, V any] struct {
-	Key   K
-	Value V
-	seq   uint64
-	hash  uint64
+	Key    K
+	Value  V
+	seq    uint64
+	hash   uint64
+	weight int
 }
 
 // home returns the slot where the probe for hash starts.
@@ -202,10 +204,10 @@ func (s *shard[K, V]) growLocked() *table[K, V] {
 	return t
 }
 
-// replaceLocked publishes v as the value of the entry e at pos. It publishes
-// a copy because a published entry is immutable.
-func (s *shard[K, V]) replaceLocked(t *table[K, V], pos int, e *entry[K, V], v V) {
-	t.slots[pos].Store(&entry[K, V]{Key: e.Key, Value: v, seq: e.seq, hash: e.hash})
+// replaceLocked publishes v, of weight w, as the value of the entry e at pos.
+// It publishes a copy because a published entry is immutable.
+func (s *shard[K, V]) replaceLocked(t *table[K, V], pos int, e *entry[K, V], v V, w int) {
+	t.slots[pos].Store(&entry[K, V]{Key: e.Key, Value: v, seq: e.seq, hash: e.hash, weight: w})
 }
 
 // removeLocked deletes the entry at pos and moves later entries of its run
@@ -257,19 +259,42 @@ func (s *shard[K, V]) appendLocked(dst []*entry[K, V]) []*entry[K, V] {
 }
 
 func (s *shard[K, V]) set(c *Cache[K, V], idx int, hash uint64, k K, v V) error {
+	var (
+		w   int
+		err error
+	)
+
+	// Checking weigh here instead of calling weightOf directly keeps Set fast
+	// for caches made by New: weightOf does not inline.
+	if c.weigh != nil {
+		w, err = c.weightOf(k, v)
+	}
+
 	s.mu.Lock()
 	s.setCalls++
 
-	// Update existing key - no count change
-	if t, pos, e := s.findLocked(hash, k); pos >= 0 {
-		s.replaceLocked(t, pos, e, v)
+	if err != nil {
+		s.mu.Unlock()
+
+		return err
+	}
+
+	// An update that adds no weight needs no room, so it locks only the
+	// shard. Every entry of a cache made by New weighs 0, so all its updates
+	// take this path.
+	if t, pos, e := s.findLocked(hash, k); pos >= 0 && w <= e.weight {
+		s.replaceLocked(t, pos, e, v, w)
+
+		if w != e.weight {
+			c.weight.Add(int64(w - e.weight))
+		}
 		s.mu.Unlock()
 
 		return nil
 	}
 	s.mu.Unlock()
 
-	_, err := c.runInsert(opSet, idx, hash, k, v)
+	_, err = c.runInsert(opSet, idx, hash, k, v, w)
 
 	return err
 }
@@ -287,7 +312,14 @@ func (s *shard[K, V]) getOrSet(c *Cache[K, V], idx int, hash uint64, k K, v V) (
 	}
 	s.mu.Unlock()
 
-	result, err := c.runInsert(opGetOrSet, idx, hash, k, v)
+	w, err := c.weightOf(k, v)
+	if err != nil {
+		var zero V
+
+		return zero, false, err
+	}
+
+	result, err := c.runInsert(opGetOrSet, idx, hash, k, v, w)
 	if err != nil {
 		var zero V
 
@@ -307,7 +339,12 @@ func (s *shard[K, V]) setIfAbsent(c *Cache[K, V], idx int, hash uint64, k K, v V
 	}
 	s.mu.Unlock()
 
-	result, err := c.runInsert(opSetIfAbsent, idx, hash, k, v)
+	w, err := c.weightOf(k, v)
+	if err != nil {
+		return false, err
+	}
+
+	result, err := c.runInsert(opSetIfAbsent, idx, hash, k, v, w)
 	if err != nil {
 		return false, err
 	}
@@ -319,9 +356,13 @@ func (s *shard[K, V]) delete(c *Cache[K, V], hash uint64, k K) {
 	s.mu.Lock()
 	s.deletes++
 
-	if t, pos, _ := s.findLocked(hash, k); pos >= 0 {
+	if t, pos, e := s.findLocked(hash, k); pos >= 0 {
 		s.removeLocked(t, pos)
 		c.entryCount.Add(-1)
+
+		if e.weight != 0 {
+			c.weight.Add(-int64(e.weight))
+		}
 	}
 	s.mu.Unlock()
 }
@@ -333,6 +374,10 @@ func (s *shard[K, V]) getAndDelete(c *Cache[K, V], hash uint64, k K) (V, bool) {
 	if t, pos, e := s.findLocked(hash, k); pos >= 0 {
 		s.removeLocked(t, pos)
 		c.entryCount.Add(-1)
+
+		if e.weight != 0 {
+			c.weight.Add(-int64(e.weight))
+		}
 		s.mu.Unlock()
 
 		return e.Value, true
