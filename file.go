@@ -25,7 +25,9 @@ var syncFile = (*os.File).Sync
 // The saved data may be loaded with [LoadFromFile].
 //
 // SaveToFile returns an error if K or V has a field that gob would not
-// encode, such as an unexported struct field.
+// encode, such as an unexported struct field. It cannot detect fields dropped
+// from a struct that embeds a type with a GobEncode or MarshalBinary method;
+// see [Cache.SaveTo].
 func (c *Cache[K, V]) SaveToFile(filePath string) error {
 	return c.SaveToFileConcurrent(filePath, 1)
 }
@@ -38,7 +40,9 @@ func (c *Cache[K, V]) SaveToFile(filePath string) error {
 // The saved data may be loaded with [LoadFromFile].
 //
 // SaveToFileConcurrent returns an error if K or V has a field that gob would
-// not encode, such as an unexported struct field.
+// not encode, such as an unexported struct field. It cannot detect fields
+// dropped from a struct that embeds a type with a GobEncode or MarshalBinary
+// method; see [Cache.SaveTo].
 func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) error {
 	dir := filepath.Dir(filePath)
 	if _, err := os.Stat(dir); err != nil {
@@ -98,6 +102,13 @@ func (c *Cache[K, V]) SaveToFileConcurrent(filePath string, concurrency int) err
 //
 // SaveTo returns an error if K or V has a field that gob would not encode,
 // such as an unexported struct field.
+//
+// SaveTo cannot detect one kind of dropped field. A struct that embeds a type
+// with a GobEncode or MarshalBinary method, such as [time.Time], inherits that
+// method, so gob encodes only the embedded value. SaveTo and [LoadFrom] return
+// nil, the struct's other fields load as zero values, and keys that differed
+// only in those fields load as one entry. Give the embedded field a name or,
+// for values, convert them with [SaveToFunc].
 func (c *Cache[K, V]) SaveTo(w io.Writer) error {
 	return c.save(w, 1)
 }
@@ -113,7 +124,9 @@ func (c *Cache[K, V]) SaveTo(w io.Writer) error {
 // the cache.
 //
 // SaveToFunc returns an error if K or S has a field that gob would not
-// encode, such as an unexported struct field.
+// encode, such as an unexported struct field. It cannot detect fields dropped
+// from a struct that embeds a type with a GobEncode or MarshalBinary method,
+// so neither K nor S should embed one; see [Cache.SaveTo].
 func SaveToFunc[K comparable, V, S any](c *Cache[K, V], w io.Writer, save func(K, V) (S, bool)) error {
 	if err := checkGobTypes[K, S](); err != nil {
 		return err
