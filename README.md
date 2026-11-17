@@ -10,7 +10,7 @@ A fast, generic, thread-safe cache for Go.
 ## Features
 
 * **Generic**: Type-safe API.
-* **Zero allocations**: No allocations on `Get` ops.
+* **No allocations on `Get` with string keys**: Other key types can allocate once per `Get` while hashing, and every `Set` allocates the entry it stores.
 * **Thread-safe**: Concurrent goroutines may read and write into a single cache instance.
 * **FIFO eviction**: Oldest entries are evicted first when the cache is full.
 * **Weighted capacity**: `NewWeighted` also bounds the total weight of the entries, such as the bytes of their values.
@@ -138,7 +138,7 @@ The cache uses a sharded design for concurrent scalability:
 | **Capacity** | Bytes-based | Entry count, plus total weight with `NewWeighted` |
 | **Storage** | Ring buffer of bytes | Open-addressing hash table per shard |
 | **Eviction** | FIFO (by byte position) | FIFO (by insertion order) |
-| **Allocations** | 1 alloc/Get | Zero |
+| **Allocations** | Get with nil dst: 1 per hit. Set: 0 | Get with string keys: 0. Set: 1 or more |
 
 ## Benchmarks
 
@@ -323,7 +323,7 @@ Compared against the original [VictoriaMetrics/fastcache](https://github.com/Vic
 Highlights:
 
 * **2.4x faster** geomean sec/op than otter and the original fastcache (48.5 ns vs 116.2 ns and 118.4 ns).
-* **Zero allocations on `Get`**. A `Set` that replaces a value allocates the new entry (64 B/op here), about what otter allocates on every write; the original fastcache allocates on reads instead.
+* **Zero allocations on `Get`** with string keys. Every `Set` allocates the entry it stores (64 B/op here), about what otter allocates on every write. The original fastcache allocates on reads instead: its `Get` with a `nil` destination copies the value out, so B/op tracks the value size. Its allocs/op shows 0 from `Get/256` up because some of those `Get` calls miss, and the average, below 1, is truncated to an integer.
 * **`GetParallel`** is 5x to 11x faster than the original fastcache. Otter still takes 5% to 31% less time in 8 of 10 `GetParallel` sizes, and 1% to 22% less in `Get` from 1024 keys up.
 * **Writes**: this fork wins every `Set` and `SetParallel` case against otter. Against the original fastcache it wins every `SetGet` case and `Set` from 128 keys up; the original is faster for `Set` on 1 and 16 keys.
 
