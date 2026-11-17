@@ -1005,6 +1005,17 @@ func testDeleteChurnKeepsOrderLogBounded(t *testing.T, key func(int) string, rem
 	}
 	defer c.Reset()
 
+	// With no live entries, the log holds the dead slots that have not yet
+	// reached the compaction threshold, plus the last one. The pass that
+	// starts at the threshold checks compactStep slots per insert while each
+	// insert adds one, so the log grows by up to 1/(compactStep-1) of its
+	// length before the pass ends. The bound allows a sixth, which a
+	// compactStep below 7 would exceed, and which keeps the extra memory
+	// that a pass costs small.
+	const threshold = minCompactSlots + 1
+
+	longest := 0
+
 	for i := range 100_000 {
 		k := key(i)
 		if err := c.Set(k, i); err != nil {
@@ -1012,16 +1023,14 @@ func testDeleteChurnKeepsOrderLogBounded(t *testing.T, key func(int) string, rem
 		}
 
 		remove(c, k)
+
+		c.orderMu.Lock()
+		longest = max(longest, c.order.len)
+		c.orderMu.Unlock()
 	}
 
-	// With no live entries, the log may hold only the dead slots that have
-	// not yet reached the compaction threshold, plus the last one.
-	c.orderMu.Lock()
-	pending := c.order.len
-	c.orderMu.Unlock()
-
-	if pending > minCompactSlots+1 {
-		t.Fatalf("order log holds %d slots for an empty cache; want at most %d", pending, minCompactSlots+1)
+	if limit := threshold + threshold/6 + 1; longest > limit {
+		t.Fatalf("order log held %d slots for an empty cache; want at most %d", longest, limit)
 	}
 }
 
@@ -1228,61 +1237,167 @@ func TestCacheEvictionCostIndependentOfMaxEntries(t *testing.T) {
 	}
 }
 
-// TestSlotRingKeepsFIFOOrder mixes pushes, pops, and retains so that the ring
-// wraps around before it grows or drops slots. The cache tests rarely get
-// there: the ring wraps only after evictions, and grows after that only when
-// deleted entries pile up.
+// TestSlotRingKeepsFIFOOrder mixes pushes, pops, and compaction passes so that
+// the ring wraps around before it grows or drops slots. The cache tests rarely
+// get there: the ring wraps only after evictions, and grows after that only
+// when deleted entries pile up. The passes check a varying number of slots per
+// round, so that some slots are kept before an eviction puts one back in front.
 func TestSlotRingKeepsFIFOOrder(t *testing.T) {
 	t.Parallel()
 
 	var (
 		ring slotRing
-		want []slot
+		want []slot // every slot that a pass has not dropped, dead ones too
 		seq  uint64
 	)
 
-	keep := func(s slot) bool { return s.seq%3 != 0 }
+	live := func(s slot) bool { return s.seq%3 != 0 }
 
-	for round := range 300 {
-		for range round%7 + 3 {
+	// queued is the number of slots in the queue, which leaves out the holes.
+	queued := func() int { return ring.len - ring.holes }
+
+	checkPass := func(round int) {
+		t.Helper()
+
+		switch {
+		case ring.holes < 0 || ring.unchecked < 0 || ring.holes+ring.unchecked > ring.len:
+			t.Fatalf("round %d: holes=%d and unchecked=%d do not fit in len=%d", round, ring.holes, ring.unchecked, ring.len)
+		case ring.unchecked == 0 && ring.holes != 0:
+			t.Fatalf("round %d: idle ring has %d holes", round, ring.holes)
+		}
+	}
+
+	// popWant drops from want the dead slots that a pass already removed
+	// from the ring, and then the slot that the ring popped.
+	popWant := func(round int, got slot) {
+		t.Helper()
+
+		for len(want) > 0 && want[0] != got && !live(want[0]) {
+			want = want[1:]
+		}
+
+		if len(want) == 0 || want[0] != got {
+			t.Fatalf("round %d: pop returned seq %d; want %v", round, got.seq, want[:min(1, len(want))])
+		}
+
+		want = want[1:]
+	}
+
+	for round := range 600 {
+		for range round%4 + 1 {
 			seq++
 			ring.push(slot{seq: seq})
 			want = append(want, slot{seq: seq})
 		}
 
-		for range min(round%5, len(want)) {
-			if got := ring.pop(); got != want[0] {
-				t.Fatalf("round %d: pop returned seq %d; want %d", round, got.seq, want[0].seq)
+		checkPass(round)
+
+		for range min(round%3, queued()) {
+			popWant(round, ring.pop())
+			checkPass(round)
+		}
+
+		if round%11 == 0 && ring.unchecked == 0 {
+			ring.unchecked = ring.len
+		}
+
+		if ring.unchecked > 0 {
+			n, checks := round%5+1, 0
+
+			ring.compact(func(s slot) bool { checks++; return live(s) }, n)
+
+			if checks > n {
+				t.Fatalf("round %d: compact checked %d slots; want at most %d", round, checks, n)
 			}
 
-			want = want[1:]
+			checkPass(round)
 		}
 
 		// Eviction that keeps the oldest slot pops it, pops the next one,
 		// and puts the first back in front.
-		if len(want) > 1 {
+		if queued() > 1 {
 			kept := ring.pop()
-			ring.pop()
+			popWant(round, kept)
+			popWant(round, ring.pop())
 			ring.pushFront(kept)
 
-			want = append(want[:1], want[2:]...)
+			want = slices.Insert(want, 0, kept)
+
+			checkPass(round)
 		}
 
-		if round%11 == 0 {
-			ring.retain(keep)
+		// The queue, with the holes left out, still holds every live slot in
+		// order.
+		var queue []slot
 
-			want = slices.DeleteFunc(want, func(s slot) bool { return !keep(s) })
-		}
+		firstHole := ring.len - ring.holes - ring.unchecked
 
-		if ring.len != len(want) {
-			t.Fatalf("round %d: ring holds %d slots; want %d", round, ring.len, len(want))
-		}
-
-		for i, s := range want {
-			if got := ring.buf[ring.index(i)]; got != s {
-				t.Fatalf("round %d: slot %d has seq %d; want %d", round, i, got.seq, s.seq)
+		for i := range ring.len {
+			if i >= firstHole && i < firstHole+ring.holes {
+				continue
 			}
+
+			queue = append(queue, ring.buf[ring.index(i)])
 		}
+
+		dead := func(s slot) bool { return !live(s) }
+
+		if !slices.Equal(slices.DeleteFunc(slices.Clone(queue), dead), slices.DeleteFunc(slices.Clone(want), dead)) {
+			t.Fatalf("round %d: queue is %v; want live slots of %v", round, queue, want)
+		}
+	}
+}
+
+// TestCacheCompactsOrderLogInSmallSteps checks that deleting most entries does
+// not make the next insert rewrite the whole order log, which would hold up
+// every other insert for time in proportion to the cache.
+func TestCacheCompactsOrderLogInSmallSteps(t *testing.T) {
+	t.Parallel()
+
+	const n = 20_000
+
+	c, err := New[int, int](2 * n)
+	if err != nil {
+		t.Fatalf("New error: %s", err)
+	}
+	defer c.Reset()
+
+	for i := range n {
+		if err := c.Set(i, i); err != nil {
+			t.Fatalf("Set(%d) error: %s", i, err)
+		}
+	}
+
+	for i := range n * 6 / 10 {
+		c.Delete(i)
+	}
+
+	ringLen := func() int {
+		c.orderMu.Lock()
+		defer c.orderMu.Unlock()
+
+		return c.order.len
+	}
+
+	if err := c.Set(-1, 0); err != nil {
+		t.Fatalf("Set error: %s", err)
+	}
+
+	// A whole-ring pass would have cut the log down to the live entries.
+	if got := ringLen(); got < n {
+		t.Fatalf("first Set after the deletes left %d slots; want at least %d, since the pass has barely started", got, n)
+	}
+
+	// The pass checks compactStep slots per insert and each insert adds one, so
+	// it ends within about n/(compactStep-1) inserts.
+	for i := range 2 * n / (compactStep - 1) {
+		if err := c.Set(-2-i, 0); err != nil {
+			t.Fatalf("Set error: %s", err)
+		}
+	}
+
+	if got, limit := ringLen(), c.Len()+minCompactSlots; got > limit {
+		t.Fatalf("order log holds %d slots for %d entries after the pass; want at most %d", got, c.Len(), limit)
 	}
 }
 
