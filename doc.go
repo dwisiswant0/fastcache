@@ -66,7 +66,9 @@
 // [SaveToFunc] saves the entries that a function selects, converted to values
 // of a type that gob can encode, so it can save a cache whose values gob
 // cannot encode. [LoadFromFunc] passes each saved entry to a function, such as
-// the Set method of a cache that already exists.
+// the Set method of a cache that already exists. To restore a cache made by
+// [NewWeighted], make a new one with NewWeighted and pass its Set method to
+// LoadFromFunc. [LoadFrom] and [LoadFromFile] drop its weight bound.
 //
 // # Thread Safety
 //

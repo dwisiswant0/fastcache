@@ -110,10 +110,11 @@ func New[K comparable, V any](maxEntries int) (*Cache[K, V], error) {
 // To bound the cache by weight alone, pass [math.MaxInt] as maxEntries. The
 // cache allocates storage as entries are stored, not up front.
 //
-// [LoadFrom] and [LoadFromFile] return caches bounded only by entry count. To
-// load saved entries into a weighted cache, pass its [Cache.Set] to
-// [LoadFromFunc], which then stops with [ErrInvalidWeight] at the first saved
-// value heavier than maxWeight.
+// To restore a saved weighted cache, make a new one with NewWeighted and the
+// same arguments, then pass its [Cache.Set] to [LoadFromFunc], which stops with
+// [ErrInvalidWeight] at the first saved value heavier than maxWeight.
+// [LoadFrom] and [LoadFromFile] drop the weight bound, so a cache saved with
+// [math.MaxInt] as maxEntries loads with no bound at all.
 //
 // NewWeighted returns an error if maxEntries or maxWeight is not positive, or
 // if weigh is nil.

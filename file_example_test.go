@@ -3,8 +3,10 @@ package fastcache_test
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"go.dw1.io/fastcache"
 )
@@ -291,4 +293,64 @@ func ExampleLoadFromFunc() {
 	// Output:
 	// c:2
 	// d:3
+}
+
+// ExampleLoadFromFunc_weighted demonstrates restoring a weighted cache from a
+// file. LoadFromFile would return a cache with no weight bound.
+func ExampleLoadFromFunc_weighted() {
+	tmpDir, _ := os.MkdirTemp("", "fastcache-example")
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	filePath := filepath.Join(tmpDir, "cache.dat")
+
+	weigh := func(_ string, v string) int { return len(v) }
+
+	// With math.MaxInt entries allowed, only the weight bounds the cache.
+	saved, err := fastcache.NewWeighted(math.MaxInt, 10, weigh)
+	if err != nil {
+		return
+	}
+
+	for _, k := range []string{"a", "b"} {
+		if err := saved.Set(k, "1234"); err != nil {
+			return
+		}
+	}
+
+	if err := saved.SaveToFile(filePath); err != nil {
+		fmt.Println("Error saving:", err)
+		return
+	}
+
+	saved.Reset()
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		fmt.Println("Error opening:", err)
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	cache, err := fastcache.NewWeighted(math.MaxInt, 10, weigh)
+	if err != nil {
+		return
+	}
+	defer cache.Reset()
+
+	if err := fastcache.LoadFromFunc(f, cache.Set); err != nil {
+		// Drop the entries loaded before the error, as LoadFromFileOrNew does.
+		cache.Reset()
+		fmt.Println("Error loading:", err)
+		return
+	}
+
+	// Storing c brings the total weight to 12, over the limit of 10, so the
+	// restored cache evicts the oldest entry, a.
+	if err := cache.Set("c", "1234"); err != nil {
+		return
+	}
+
+	fmt.Println(slices.Collect(cache.KeysFIFO()))
+
+	// Output:
+	// [b c]
 }
